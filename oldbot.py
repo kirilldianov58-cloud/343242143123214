@@ -1,676 +1,464 @@
+#!/usr/bin/env python3
+"""
+Telegram-бот для визажиста
+Версия: 1.1 – исправлена ошибка с cancel_booking
+"""
+
 import asyncio
+import logging
 import sqlite3
-from datetime import datetime, timedelta
-import httpx
-from cachetools import TTLCache
-import pytz
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+import re
+from datetime import datetime, date, timedelta
 
-# ================== НАСТРОЙКИ ==================
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-TELEGRAM_TOKEN = "7728656883:AAEme2lmHObvqMOoifogEYRiy3LTyk2W5bE"
-FOOTBALL_DATA_TOKEN = "ec0171bdf2db4f6baf095fb95ce0deb0"
+# ==================== КОНФИГУРАЦИЯ (ЗАМЕНИТЕ НА СВОИ) ====================
+BOT_TOKEN = "8615339487:AAE34fezdBoQ1Dof5eoCzZi4bAwMpSrdrY0"
+ADMIN_IDS = [6298119477]  # Замените на свой Telegram ID
+REVIEW_CHANNEL_ID = -1003884818442  # Замените на ID канала
 
-LEAGUES = {
-    "apl": {"id": "PL", "name": "АПЛ", "logo": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
-    "laliga": {"id": "PD", "name": "Ла Лига", "logo": "🇪🇸"},
-    "bundesliga": {"id": "BL1", "name": "Бундеслига", "logo": "🇩🇪"},
-    "seriea": {"id": "SA", "name": "Серия А", "logo": "🇮🇹"},
-    "ucl": {"id": "CL", "name": "Лига Чемпионов", "logo": "🏆"}
-}
+WORK_START_HOUR = 10
+WORK_END_HOUR = 20
+WORK_DAYS = [0, 1, 2, 3, 4, 5, 6]
 
-# Кэш для разных типов данных
-cache = {
-    'standings': TTLCache(maxsize=50, ttl=900),
-    'matches': TTLCache(maxsize=100, ttl=300),
-    'live': TTLCache(maxsize=20, ttl=30),
-}
+# ==================== ЛОГИРОВАНИЕ ====================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-UTC_TZ = pytz.UTC
-MSK_TZ = pytz.timezone('Europe/Moscow')
-
-# ================== БАЗА ДАННЫХ ==================
-
-conn = sqlite3.connect("football_bot.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("CREATE TABLE IF NOT EXISTS subscriptions (user_id INTEGER, team TEXT)")
-cursor.execute("CREATE TABLE IF NOT EXISTS goal_subscriptions (user_id INTEGER, match_id INTEGER, PRIMARY KEY (user_id, match_id))")
-conn.commit()
-
-# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С API ==================
-
-async def fetch_matches(competition_id, date_from, date_to):
-    cache_key = f"matches_{competition_id}_{date_from}_{date_to}"
-    if cache_key in cache['matches']:
-        return cache['matches'][cache_key]
-
-    url = "https://api.football-data.org/v4/matches"
-    params = {
-        "competitions": competition_id,
-        "dateFrom": date_from,
-        "dateTo": date_to
-    }
-    headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers, params=params)
-            if resp.status_code == 200:
-                data = resp.json()
-                matches = data.get("matches", [])
-                cache['matches'][cache_key] = matches
-                return matches
-            else:
-                print(f"⚠️ Ошибка API матчей: {resp.status_code}")
-                return []
-    except Exception as e:
-        print(f"❌ Ошибка запроса матчей: {e}")
-        return []
-
-async def fetch_standings(competition_id):
-    cache_key = f"standings_{competition_id}"
-    if cache_key in cache['standings']:
-        return cache['standings'][cache_key]
-
-    url = f"https://api.football-data.org/v4/competitions/{competition_id}/standings"
-    headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                if "standings" in data and len(data["standings"]) > 0:
-                    table = data["standings"][0]["table"]
-                    cache['standings'][cache_key] = table
-                    return table
-            print(f"⚠️ Ошибка таблицы: {resp.status_code}")
-            return []
-    except Exception as e:
-        print(f"❌ Ошибка standings: {e}")
-        return []
-
-async def fetch_live_matches():
-    cache_key = "live_matches"
-    if cache_key in cache['live']:
-        return cache['live'][cache_key]
-
-    url = "https://api.football-data.org/v4/matches"
-    params = {"status": "LIVE"}
-    headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers, params=params)
-            if resp.status_code == 200:
-                data = resp.json()
-                matches = data.get("matches", [])
-                cache['live'][cache_key] = matches
-                return matches
-            else:
-                print(f"⚠️ Ошибка API live: {resp.status_code}")
-                return []
-    except Exception as e:
-        print(f"❌ Ошибка запроса live: {e}")
-        return []
-
-# ================== ВРЕМЯ ==================
-
-def utc_to_msk(utc_time_str):
-    try:
-        if utc_time_str.endswith('Z'):
-            utc_time_str = utc_time_str[:-1] + '+00:00'
-        utc_dt = datetime.fromisoformat(utc_time_str)
-        if utc_dt.tzinfo is None:
-            utc_dt = UTC_TZ.localize(utc_dt)
-        msk_dt = utc_dt.astimezone(MSK_TZ)
-        return msk_dt
-    except Exception as e:
-        print(f"❌ Ошибка преобразования времени: {e}")
-        return None
-
-# ================== ДАННЫЕ ЛИГИ ЧЕМПИОНОВ 2025/26 ==================
-
-UCL_PLAYOFF = {
-    "round_of_16": {
-        "name": "1/8 финала (первые матчи)",
-        "dates": "10–11 марта 2026",
-        "matches": [
-            {"home": "Реал Мадрид", "away": "Манчестер Сити", "agg": "3:0", "first": "3:0"},
-            {"home": "ПСЖ", "away": "Челси", "agg": "5:2", "first": "5:2"},
-            {"home": "Бавария", "away": "Аталанта", "agg": "6:1", "first": "6:1"},
-            {"home": "Атлетико Мадрид", "away": "Тоттенхэм", "agg": "5:2", "first": "5:2"},
-            {"home": "Буде-Глимт", "away": "Спортинг", "agg": "3:0", "first": "3:0"},
-            {"home": "Галатасарай", "away": "Ливерпуль", "agg": "1:0", "first": "1:0"},
-            {"home": "Ньюкасл", "away": "Барселона", "agg": "1:1", "first": "1:1"},
-            {"home": "Байер", "away": "Арсенал", "agg": "1:1", "first": "1:1"}
+# ==================== БАЗА ДАННЫХ ====================
+def init_db():
+    conn = sqlite3.connect("makeup_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            phone TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            price INTEGER NOT NULL,
+            duration INTEGER DEFAULT 60
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS appointments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            service_id INTEGER,
+            appointment_date TEXT,
+            appointment_time TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            review_id INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users(telegram_id),
+            FOREIGN KEY (service_id) REFERENCES services(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            appointment_id INTEGER,
+            service_id INTEGER,
+            text TEXT NOT NULL,
+            photo_file_id TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            published_at TIMESTAMP,
+            rejection_reason TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+        )
+    """)
+    cursor.execute("SELECT COUNT(*) FROM services")
+    if cursor.fetchone()[0] == 0:
+        services = [
+            ("Свадебный макияж", 5000, 120),
+            ("Вечерний макияж", 4000, 90),
+            ("Дневной макияж", 3500, 60),
+            ("Макияж для фотосессии", 4500, 90),
+            ("Коррекция бровей", 1000, 30),
+            ("Окрашивание бровей", 800, 30),
+            ("Наращивание ресниц", 2000, 90),
         ]
-    },
-    "quarterfinals": {
-        "name": "1/4 финала",
-        "dates": "1–2 и 8–9 апреля 2026",
-        "matches": [{"info": "Жеребьёвка после 1/8 финала"}]
-    },
-    "semifinals": {
-        "name": "1/2 финала",
-        "dates": "22–23 и 29–30 апреля 2026",
-        "matches": [{"info": "Пары определятся позже"}]
-    },
-    "final": {
-        "name": "ФИНАЛ",
-        "date": "30 мая 2026, Будапешт",
-        "match": {"info": "Финалисты станут известны позднее"}
-    }
-}
+        cursor.executemany("INSERT INTO services (name, price, duration) VALUES (?, ?, ?)", services)
+    conn.commit()
+    conn.close()
+    print("✅ База данных инициализирована")
 
-# ================== МЕНЮ ==================
-
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏴󠁧󠁢󠁥󠁮󠁧󠁿 АПЛ", callback_data="league_apl"),
-         InlineKeyboardButton("🇪🇸 Ла Лига", callback_data="league_laliga")],
-        [InlineKeyboardButton("🇩🇪 Бундеслига", callback_data="league_bundesliga"),
-         InlineKeyboardButton("🇮🇹 Серия А", callback_data="league_seriea")],
-        [InlineKeyboardButton("🏆 Лига Чемпионов", callback_data="league_ucl")],
-        [InlineKeyboardButton("🔴 LIVE матчи", callback_data="live")],
-        [InlineKeyboardButton("⚽ LIVE голы", callback_data="goal_live")],
-        [InlineKeyboardButton("⭐ Мои подписки", callback_data="my_subs")]
-    ])
-
-def league_menu(league_key):
-    league = LEAGUES[league_key]
-    if league_key == "ucl":
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏆 Плей-офф 2025/26", callback_data="ucl_playoff")],
-            [InlineKeyboardButton("📅 Матчи (48ч)", callback_data=f"matches_{league_key}")],
-            [InlineKeyboardButton("📊 Таблица", callback_data=f"table_{league_key}")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ])
+def db_query(query, params=None, fetch_one=False, fetch_all=False):
+    conn = sqlite3.connect("makeup_bot.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if params:
+        cursor.execute(query, params)
     else:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📅 Матчи (48ч)", callback_data=f"matches_{league_key}")],
-            [InlineKeyboardButton("📊 Таблица", callback_data=f"table_{league_key}")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ])
+        cursor.execute(query)
+    result = None
+    if fetch_one:
+        result = cursor.fetchone()
+    elif fetch_all:
+        result = cursor.fetchall()
+    else:
+        conn.commit()
+        result = cursor.lastrowid
+    conn.close()
+    return result
 
-# ================== START ==================
+# ==================== FSM СОСТОЯНИЯ ====================
+class BookingState(StatesGroup):
+    choosing_service = State()
+    choosing_date = State()
+    choosing_time = State()
+    entering_phone = State()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⚽ <b>Футбольный бот PRO</b>\n\n<i>Выберите лигу:</i>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu()
+class ReviewState(StatesGroup):
+    waiting_for_text = State()
+    waiting_for_photo = State()
+
+# ==================== КЛАВИАТУРЫ ====================
+def main_menu_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 Записаться", callback_data="book")
+    builder.button(text="💇‍♀️ Услуги", callback_data="services")
+    builder.button(text="📋 Мои записи", callback_data="my_appointments")
+    builder.button(text="⭐ Отзывы", callback_data="reviews")
+    builder.adjust(2)
+    return builder.as_markup()
+
+def admin_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 Записи на сегодня", callback_data="admin_today")
+    builder.button(text="🗓 Записи на завтра", callback_data="admin_tomorrow")
+    builder.button(text="📝 Все активные записи", callback_data="admin_all")
+    builder.button(text="✅ Отзывы на модерацию", callback_data="admin_pending_reviews")
+    builder.button(text="🔙 Назад", callback_data="back_main")
+    builder.adjust(2)
+    return builder.as_markup()
+
+def services_keyboard():
+    services = db_query("SELECT id, name, price FROM services", fetch_all=True)
+    builder = InlineKeyboardBuilder()
+    for s in services:
+        builder.button(text=f"{s['name']} - {s['price']} ₽", callback_data=f"service_{s['id']}")
+    builder.button(text="🔙 Назад", callback_data="back_main")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def pending_reviews_keyboard():
+    reviews = db_query("SELECT id, user_id, text FROM reviews WHERE status='pending'", fetch_all=True)
+    builder = InlineKeyboardBuilder()
+    for r in reviews:
+        user = db_query("SELECT full_name, username FROM users WHERE telegram_id=?", (r['user_id'],), fetch_one=True)
+        name = user['full_name'] or user['username'] or str(r['user_id'])
+        builder.button(text=f"{name}: {r['text'][:30]}...", callback_data=f"review_{r['id']}")
+    builder.button(text="🔙 Назад", callback_data="back_admin")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def review_action_keyboard(review_id):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Опубликовать", callback_data=f"publish_review_{review_id}")
+    builder.button(text="❌ Отклонить", callback_data=f"reject_review_{review_id}")
+    builder.button(text="🔙 Назад", callback_data="admin_pending_reviews")
+    builder.adjust(2)
+    return builder.as_markup()
+
+# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
+async def start_command(message: Message, state: FSMContext):
+    await state.clear()
+    user_id = message.from_user.id
+    username = message.from_user.username
+    full_name = message.from_user.full_name
+    db_query("INSERT OR IGNORE INTO users (telegram_id, username, full_name) VALUES (?, ?, ?)",
+             (user_id, username, full_name))
+    await message.answer(
+        "✨ Добро пожаловать! ✨\n\n"
+        "Я бот визажиста. Вы можете записаться на услуги.\n\n"
+        "Выберите действие:",
+        reply_markup=main_menu_keyboard()
     )
 
-# ================== МАТЧИ ЗА 48 ЧАСОВ ==================
+async def cancel_booking(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Бронирование отменено.", reply_markup=main_menu_keyboard())
 
-async def matches_next_48h(update, league_key):
-    league = LEAGUES[league_key]
-    date_from = datetime.now().strftime("%Y-%m-%d")
-    date_to = (datetime.now() + timedelta(hours=48)).strftime("%Y-%m-%d")
+async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.data == "book":
+        await start_booking(callback.message, state)
+    elif callback.data == "services":
+        await show_services(callback.message)
+    elif callback.data == "my_appointments":
+        await show_my_appointments(callback.message, callback.from_user.id)
+    elif callback.data == "reviews":
+        await show_reviews(callback.message)
+    elif callback.data == "back_main":
+        await callback.message.edit_text("Выберите действие:", reply_markup=main_menu_keyboard())
+    elif callback.data == "back_admin":
+        await callback.message.edit_text("Админ-панель:", reply_markup=admin_keyboard())
 
-    cache_key = f"matches_{league['id']}_{date_from}_{date_to}"
-    cached_matches = cache['matches'].get(cache_key)
-    if cached_matches is not None:
-        matches = cached_matches
-        loading_msg = None
-    else:
-        loading_msg = await update.message.reply_text(f"⏳ Загружаю матчи {league['name']}...")
-        matches = await fetch_matches(league["id"], date_from, date_to)
+async def show_services(message: Message):
+    services = db_query("SELECT name, price FROM services", fetch_all=True)
+    text = "💇‍♀️ *Наши услуги:*\n\n"
+    for s in services:
+        text += f"• {s['name']} — {s['price']} ₽\n"
+    await message.answer(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
-    if not matches:
-        text = f"📅 <b>{league['logo']} {league['name']}</b>\n\n<i>Нет матчей с {date_from} по {date_to}</i>"
-        if loading_msg:
-            await loading_msg.edit_text(text, parse_mode=ParseMode.HTML)
-        else:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+async def show_my_appointments(message: Message, user_id: int):
+    appointments = db_query("""
+        SELECT a.appointment_date, a.appointment_time, s.name as service_name, a.status 
+        FROM appointments a
+        JOIN services s ON a.service_id = s.id
+        WHERE a.user_id = ? AND a.status IN ('pending', 'confirmed')
+        ORDER BY a.appointment_date, a.appointment_time
+    """, (user_id,), fetch_all=True)
+    if not appointments:
+        await message.answer("У вас пока нет активных записей.", reply_markup=main_menu_keyboard())
         return
+    text = "📋 *Ваши записи:*\n\n"
+    for app in appointments:
+        text += f"🗓 {app['appointment_date']} {app['appointment_time']}\n"
+        text += f"💇 {app['service_name']}\n"
+        text += f"Статус: {app['status']}\n\n"
+    await message.answer(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
-    text = f"{league['logo']} <b>МАТЧИ {league['name']}</b>\n"
-    text += f"<i>{date_from} – {date_to} (МСК)</i>\n\n"
-
-    for match in matches:
-        msk_time = utc_to_msk(match["utcDate"])
-        if msk_time:
-            time_str = msk_time.strftime("%H:%M")
-            date_str = msk_time.strftime("%d.%m")
-        else:
-            time_str = "??:??"
-            date_str = "??.??"
-
-        home = match["homeTeam"]["name"]
-        away = match["awayTeam"]["name"]
-        status = match["status"]
-
-        if status == "FINISHED":
-            score_h = match["score"]["fullTime"]["home"] or 0
-            score_a = match["score"]["fullTime"]["away"] or 0
-            text += f"✅ {date_str} {time_str}  <b>{home}</b> {score_h}-{score_a} <b>{away}</b>\n"
-        elif status in ["IN_PLAY", "PAUSED"]:
-            text += f"🔴 {date_str} {time_str}  <b>{home}</b> vs <b>{away}</b> (в игре)\n"
-        else:
-            text += f"⏳ {date_str} {time_str}  <b>{home}</b> vs <b>{away}</b>\n"
-
-    if loading_msg:
-        await loading_msg.edit_text(text, parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-# ================== ТАБЛИЦА ==================
-
-async def show_table(update, league_key):
-    league = LEAGUES[league_key]
-
-    cache_key = f"standings_{league['id']}"
-    cached_table = cache['standings'].get(cache_key)
-    if cached_table is not None:
-        table = cached_table
-        loading_msg = None
-    else:
-        loading_msg = await update.message.reply_text(f"⏳ Загружаю таблицу {league['name']}...")
-        table = await fetch_standings(league["id"])
-
-    if not table:
-        text = f"📊 <b>{league['logo']} {league['name']}</b>\n\n<i>Нет данных таблицы</i>"
-        if loading_msg:
-            await loading_msg.edit_text(text, parse_mode=ParseMode.HTML)
-        else:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+async def show_reviews(message: Message):
+    reviews = db_query("""
+        SELECT r.text, r.photo_file_id, u.full_name 
+        FROM reviews r 
+        JOIN users u ON r.user_id = u.telegram_id 
+        WHERE r.status = 'published' 
+        ORDER BY r.published_at DESC LIMIT 5
+    """, fetch_all=True)
+    if not reviews:
+        await message.answer("Пока нет отзывов. Станьте первым!", reply_markup=main_menu_keyboard())
         return
-
-    text = f"{league['logo']} <b>ТАБЛИЦА {league['name']}</b>\n\n"
-    for row in table[:10]:
-        team = row["team"]["name"]
-        pos = row["position"]
-        pts = row["points"]
-        played = row["playedGames"]
-        won = row["won"]
-        draw = row["draw"]
-        lost = row["lost"]
-        text += f"<b>{pos}.</b> {team}\n   {pts} очков | И:{played} В:{won} Н:{draw} П:{lost}\n\n"
-
-    if loading_msg:
-        await loading_msg.edit_text(text, parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-# ================== LIVE МАТЧИ (ОБЩИЙ СПИСОК) ==================
-
-async def live_matches(update):
-    cache_key = "live_matches"
-    cached = cache['live'].get(cache_key)
-    if cached is not None:
-        matches = cached
-        loading_msg = None
-    else:
-        loading_msg = await update.message.reply_text("⏳ Загружаю live‑матчи...")
-        matches = await fetch_live_matches()
-
-    if not matches:
-        text = "🔴 <b>LIVE матчи</b>\n\n<i>Сейчас нет матчей в прямом эфире</i>"
-        if loading_msg:
-            await loading_msg.edit_text(text, parse_mode=ParseMode.HTML)
+    for r in reviews:
+        text_review = f"⭐ *{r['full_name']}*\n{r['text']}"
+        if r['photo_file_id']:
+            await message.answer_photo(photo=r['photo_file_id'], caption=text_review, parse_mode="Markdown")
         else:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+            await message.answer(text_review, parse_mode="Markdown")
+    await message.answer("Выберите действие:", reply_markup=main_menu_keyboard())
+
+# ==================== БРОНИРОВАНИЕ (FSM) ====================
+async def start_booking(message: Message, state: FSMContext):
+    services = db_query("SELECT id, name FROM services", fetch_all=True)
+    if not services:
+        await message.answer("Услуги временно недоступны.", reply_markup=main_menu_keyboard())
         return
+    builder = InlineKeyboardBuilder()
+    for s in services:
+        builder.button(text=s['name'], callback_data=f"service_{s['id']}")
+    builder.button(text="🔙 Назад", callback_data="back_main")
+    await message.answer("Выберите услугу:", reply_markup=builder.as_markup())
+    await state.set_state(BookingState.choosing_service)
 
-    text = "🔴 <b>LIVE МАТЧИ</b>\n\n"
-    for match in matches:
-        league_name = match.get("competition", {}).get("name", "Неизвестная лига")
-        home = match["homeTeam"]["name"]
-        away = match["awayTeam"]["name"]
-        status = match["status"]
-        score_h = match["score"]["fullTime"]["home"] or match["score"]["halfTime"]["home"] or 0
-        score_a = match["score"]["fullTime"]["away"] or match["score"]["halfTime"]["away"] or 0
-        minute = match.get("minute", "")
-        if not minute and "IN_PLAY" in status:
-            minute = "идет"
-        elif status == "PAUSED":
-            minute = "перерыв"
-        else:
-            minute = ""
+async def service_chosen(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    service_id = int(callback.data.split("_")[1])
+    await state.update_data(service_id=service_id)
+    await callback.message.edit_text("Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2025):")
+    await state.set_state(BookingState.choosing_date)
 
-        text += f"⚽ <b>{home}</b> {score_h}–{score_a} <b>{away}</b>"
-        if minute:
-            text += f"  ({minute})"
-        text += f"\n   <i>{league_name}</i>\n\n"
-
-    if loading_msg:
-        await loading_msg.edit_text(text, parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-# ================== LIVE ГОЛЫ (ПОДПИСКА) ==================
-
-async def goal_live_menu(update):
-    matches = await fetch_live_matches()
-    if not matches:
-        await update.message.reply_text(
-            "⚽ <b>LIVE голы</b>\n\n<i>Сейчас нет матчей в прямом эфире</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
+async def date_chosen(message: Message, state: FSMContext):
+    date_str = message.text.strip()
+    if not re.match(r"\d{2}\.\d{2}\.\d{4}", date_str):
+        await message.answer("Неверный формат. Введите дату как ДД.ММ.ГГГГ")
         return
-
-    text = "⚽ <b>Выберите матч для подписки на голы:</b>\n\n"
-    keyboard = []
-    for match in matches:
-        match_id = match["id"]
-        home = match["homeTeam"]["name"]
-        away = match["awayTeam"]["name"]
-        league = match.get("competition", {}).get("name", "Неизвестная лига")
-        text += f"• {home} vs {away} ({league})\n"
-        keyboard.append([InlineKeyboardButton(
-            f"🔔 {home} – {away}",
-            callback_data=f"goal_sub_{match_id}"
-        )])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
-
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def goal_subscribe(update, match_id):
-    user_id = update.from_user.id
     try:
-        cursor.execute("INSERT OR IGNORE INTO goal_subscriptions (user_id, match_id) VALUES (?, ?)", (user_id, match_id))
-        conn.commit()
-        await update.message.reply_text(
-            f"✅ Вы подписались на уведомления о голах в этом матче!",
-            reply_markup=main_menu()
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка подписки: {e}")
-
-async def goal_unsubscribe(update, match_id):
-    user_id = update.from_user.id
-    cursor.execute("DELETE FROM goal_subscriptions WHERE user_id=? AND match_id=?", (user_id, match_id))
-    conn.commit()
-    await update.message.reply_text(
-        f"❌ Вы отписались от уведомлений о голах в этом матче.",
-        reply_markup=main_menu()
-    )
-
-# ================== ПРОСМОТР ПОДПИСОК НА ГОЛЫ ==================
-
-async def my_goal_subscriptions(update, user_id):
-    cursor.execute("SELECT match_id FROM goal_subscriptions WHERE user_id=?", (user_id,))
-    rows = cursor.fetchall()
-    if not rows:
-        await update.message.reply_text(
-            "⚽ <b>Ваши подписки на голы</b>\n\n<i>У вас нет подписок.</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
+        selected_date = datetime.strptime(date_str, "%d.%m.%Y").date()
+        if selected_date < date.today():
+            await message.answer("Дата не может быть в прошлом. Выберите другую.")
+            return
+        if selected_date.weekday() not in WORK_DAYS:
+            await message.answer("В этот день я не работаю. Выберите другой день.")
+            return
+    except ValueError:
+        await message.answer("Некорректная дата.")
         return
+    await state.update_data(date=date_str)
+    free_times = [f"{h}:00" for h in range(WORK_START_HOUR, WORK_END_HOUR)]
+    builder = InlineKeyboardBuilder()
+    for t in free_times:
+        builder.button(text=t, callback_data=f"time_{t}")
+    builder.button(text="🔙 Назад", callback_data="back_main")
+    await message.answer("Выберите время:", reply_markup=builder.as_markup())
+    await state.set_state(BookingState.choosing_time)
 
-    # Для отображения названий команд нужно получить информацию о матчах (можно из кэша или запросить)
-    # Упростим: покажем только ID матчей, или сделаем доп. запрос. Но для демо используем ID.
-    text = "⚽ <b>Ваши подписки на голы:</b>\n\n"
-    keyboard = []
-    for (match_id,) in rows:
-        text += f"• Матч ID: {match_id}\n"
-        keyboard.append([InlineKeyboardButton(f"❌ Отписаться от матча {match_id}", callback_data=f"goal_unsub_{match_id}")])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+async def time_chosen(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    time_str = callback.data.split("_")[1]
+    await state.update_data(time=time_str)
+    data = await state.get_data()
+    service = db_query("SELECT name FROM services WHERE id=?", (data['service_id'],), fetch_one=True)
+    text = f"📝 *Подтверждение записи*\n\nУслуга: {service['name']}\nДата: {data['date']}\nВремя: {time_str}\n\nДля подтверждения укажите ваш номер телефона:"
+    await callback.message.edit_text(text, parse_mode="Markdown")
+    await state.set_state(BookingState.entering_phone)
 
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ================== ЛИГА ЧЕМПИОНОВ – ПЛЕЙ-ОФФ ==================
-
-async def ucl_playoff(update):
-    text = "🏆 <b>ЛИГА ЧЕМПИОНОВ 2025/26 – ПЛЕЙ-ОФФ</b>\n\n"
-
-    r16 = UCL_PLAYOFF["round_of_16"]
-    text += f"<b>{r16['name']}</b>  ({r16['dates']})\n"
-    for m in r16["matches"]:
-        text += f"   {m['home']} – {m['away']}  {m['agg']} ({m['first']})\n"
-    text += "\n"
-
-    qf = UCL_PLAYOFF["quarterfinals"]
-    text += f"<b>{qf['name']}</b>  ({qf['dates']})\n"
-    for m in qf["matches"]:
-        text += f"   {m['info']}\n"
-    text += "\n"
-
-    sf = UCL_PLAYOFF["semifinals"]
-    text += f"<b>{sf['name']}</b>  ({sf['dates']})\n"
-    for m in sf["matches"]:
-        text += f"   {m['info']}\n"
-    text += "\n"
-
-    final = UCL_PLAYOFF["final"]
-    text += f"<b>{final['name']}</b>  ({final['date']})\n"
-    text += f"   {final['match']['info']}\n"
-
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-# ================== ПОДПИСКИ (на команды) ==================
-
-async def subscribe_team(user_id, team):
-    cursor.execute("SELECT * FROM subscriptions WHERE user_id=? AND team=?", (user_id, team))
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO subscriptions VALUES (?,?)", (user_id, team))
-        conn.commit()
-        return True
-    return False
-
-async def unsubscribe_team(user_id, team):
-    cursor.execute("DELETE FROM subscriptions WHERE user_id=? AND team=?", (user_id, team))
-    conn.commit()
-
-async def my_subscriptions(update, user_id):
-    cursor.execute("SELECT team FROM subscriptions WHERE user_id=?", (user_id,))
-    subs = [row[0] for row in cursor.fetchall()]
-
-    cursor.execute("SELECT match_id FROM goal_subscriptions WHERE user_id=?", (user_id,))
-    goal_subs = [row[0] for row in cursor.fetchall()]
-
-    if not subs and not goal_subs:
-        await update.message.reply_text(
-            "⭐ <b>У вас нет подписок</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
+async def phone_entered(message: Message, state: FSMContext):
+    phone = message.text.strip()
+    if not re.search(r"\d", phone):
+        await message.answer("Пожалуйста, введите корректный номер телефона.")
         return
-
-    text = "⭐ <b>МОИ ПОДПИСКИ</b>\n\n"
-    if subs:
-        text += "<b>Команды:</b>\n"
-        for team in subs:
-            text += f"• {team}\n"
-        text += "\n"
-    if goal_subs:
-        text += "<b>Матчи (уведомления о голах):</b>\n"
-        for mid in goal_subs:
-            text += f"• ID матча: {mid}\n"
-        text += "\n"
-
-    keyboard = []
-    if subs:
-        for team in subs:
-            keyboard.append([InlineKeyboardButton(f"❌ Отписаться от команды {team}", callback_data=f"unsub_team_{team}")])
-    if goal_subs:
-        for mid in goal_subs:
-            keyboard.append([InlineKeyboardButton(f"❌ Отписаться от матча {mid}", callback_data=f"goal_unsub_{mid}")])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
-
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ================== ОБРАБОТЧИК КНОПОК ==================
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user_id = query.from_user.id
-
-    if data == "back_to_main":
-        await query.message.reply_text(
-            "<b>Выберите лигу:</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
-        return
-
-    if data.startswith("league_"):
-        league_key = data.replace("league_", "")
-        league = LEAGUES[league_key]
-        await query.message.reply_text(
-            f"{league['logo']} <b>{league['name']}</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=league_menu(league_key)
-        )
-        return
-
-    if data.startswith("matches_"):
-        league_key = data.replace("matches_", "")
-        await matches_next_48h(query, league_key)
-        return
-
-    if data.startswith("table_"):
-        league_key = data.replace("table_", "")
-        await show_table(query, league_key)
-        return
-
-    if data == "ucl_playoff":
-        await ucl_playoff(query)
-        return
-
-    if data == "live":
-        await live_matches(query)
-        return
-
-    if data == "goal_live":
-        await goal_live_menu(query)
-        return
-
-    if data.startswith("goal_sub_"):
-        match_id = int(data.replace("goal_sub_", ""))
-        await goal_subscribe(query, match_id)
-        return
-
-    if data.startswith("goal_unsub_"):
-        match_id = int(data.replace("goal_unsub_", ""))
-        await goal_unsubscribe(query, match_id)
-        return
-
-    if data == "my_subs":
-        await my_subscriptions(query, user_id)
-        return
-
-    if data.startswith("sub_team_"):
-        team = data.replace("sub_team_", "")
-        if await subscribe_team(user_id, team):
-            await query.message.reply_text(
-                f"✅ <b>Подписка на команду {team} оформлена!</b>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_menu()
-            )
-        else:
-            await query.message.reply_text(
-                f"ℹ️ <b>Вы уже подписаны на {team}</b>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_menu()
-            )
-        return
-
-    if data.startswith("unsub_team_"):
-        team = data.replace("unsub_team_", "")
-        await unsubscribe_team(user_id, team)
-        await query.message.reply_text(
-            f"❌ <b>Отписка от команды {team} выполнена</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
-        return
-
-# ================== ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ МАТЧЕЙ ==================
-
-last_scores = {}
-notified_start = set()
-
-async def match_checker(app):
-    print("🔄 Запущен проверщик матчей (голы и старты)")
-    while True:
+    await state.update_data(phone=phone)
+    data = await state.get_data()
+    user_id = message.from_user.id
+    db_query("""
+        INSERT INTO appointments (user_id, service_id, appointment_date, appointment_time)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, data['service_id'], data['date'], data['time']))
+    await message.answer("✅ Ваша запись создана! Ожидайте подтверждения администратора.", reply_markup=main_menu_keyboard())
+    await state.clear()
+    for admin_id in ADMIN_IDS:
         try:
-            matches = await fetch_live_matches()
-            for match in matches:
-                fixture_id = match["id"]
-                home = match["homeTeam"]["name"]
-                away = match["awayTeam"]["name"]
-                status = match["status"]
-                hs = match["score"]["fullTime"]["home"] or match["score"]["halfTime"]["home"] or 0
-                aw = match["score"]["fullTime"]["away"] or match["score"]["halfTime"]["away"] or 0
-                score = f"{hs}-{aw}"
-
-                # Уведомление о старте матча (если только начался)
-                if status in ["IN_PLAY", "LIVE"] and fixture_id not in notified_start:
-                    cursor.execute("SELECT user_id FROM goal_subscriptions WHERE match_id=?", (fixture_id,))
-                    users = cursor.fetchall()
-                    for (user_id,) in users:
-                        try:
-                            await app.bot.send_message(
-                                chat_id=user_id,
-                                text=f"🏁 <b>Матч начался!</b>\n\n{home} vs {away}",
-                                parse_mode=ParseMode.HTML
-                            )
-                        except Exception as e:
-                            print(f"Ошибка отправки уведомления о старте: {e}")
-                    notified_start.add(fixture_id)
-
-                # Уведомление о голе (изменение счёта)
-                if fixture_id not in last_scores:
-                    last_scores[fixture_id] = score
-
-                if last_scores[fixture_id] != score:
-                    cursor.execute("SELECT user_id FROM goal_subscriptions WHERE match_id=?", (fixture_id,))
-                    users = cursor.fetchall()
-                    for (user_id,) in users:
-                        try:
-                            await app.bot.send_message(
-                                chat_id=user_id,
-                                text=f"⚽ <b>ГОЛ!</b>\n\n{home} {hs}-{aw} {away}",
-                                parse_mode=ParseMode.HTML
-                            )
-                        except Exception as e:
-                            print(f"Ошибка отправки уведомления о голе: {e}")
-                    last_scores[fixture_id] = score
-
+            await message.bot.send_message(admin_id, f"📅 Новая запись от {message.from_user.full_name} на {data['date']} {data['time']}")
         except Exception as e:
-            print(f"Ошибка в match_checker: {e}")
+            logger.error(f"Ошибка отправки админу {admin_id}: {e}")
 
-        await asyncio.sleep(30)
+# ==================== АДМИНИСТРИРОВАНИЕ ====================
+async def admin_command(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("У вас нет прав администратора.")
+        return
+    await message.answer("Админ-панель:", reply_markup=admin_keyboard())
 
-# ================== ЗАПУСК ==================
+async def admin_today(callback: CallbackQuery):
+    today_str = date.today().strftime("%d.%m.%Y")
+    appointments = db_query("""
+        SELECT a.appointment_time, s.name as service_name, u.full_name 
+        FROM appointments a 
+        JOIN services s ON a.service_id = s.id 
+        JOIN users u ON a.user_id = u.telegram_id 
+        WHERE a.appointment_date=? AND status!='completed'
+        ORDER BY a.appointment_time
+    """, (today_str,), fetch_all=True)
+    if not appointments:
+        await callback.message.edit_text(f"На сегодня ({today_str}) записей нет.", reply_markup=admin_keyboard())
+        return
+    text = f"📅 *Записи на {today_str}:*\n\n"
+    for app in appointments:
+        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n\n"
+    await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
-def main():
-    print("=" * 60)
-    print("⚽ ФУТБОЛЬНЫЙ БОТ PRO (с live‑матчами и уведомлениями о голах)")
-    print("=" * 60)
-    print(f"✅ База данных: football_bot.db")
-    print("✅ Асинхронный, с кэшированием, время МСК")
-    print("✅ Добавлены live‑матчи и подписка на голы")
-    print("=" * 60)
+async def admin_tomorrow(callback: CallbackQuery):
+    tomorrow_str = (date.today() + timedelta(days=1)).strftime("%d.%m.%Y")
+    appointments = db_query("""
+        SELECT a.appointment_time, s.name as service_name, u.full_name 
+        FROM appointments a 
+        JOIN services s ON a.service_id = s.id 
+        JOIN users u ON a.user_id = u.telegram_id 
+        WHERE a.appointment_date=? AND status!='completed'
+        ORDER BY a.appointment_time
+    """, (tomorrow_str,), fetch_all=True)
+    if not appointments:
+        await callback.message.edit_text(f"На завтра ({tomorrow_str}) записей нет.", reply_markup=admin_keyboard())
+        return
+    text = f"📅 *Записи на {tomorrow_str}:*\n\n"
+    for app in appointments:
+        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n\n"
+    await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+async def admin_all(callback: CallbackQuery):
+    appointments = db_query("""
+        SELECT a.appointment_date, a.appointment_time, s.name as service_name, u.full_name 
+        FROM appointments a 
+        JOIN services s ON a.service_id = s.id 
+        JOIN users u ON a.user_id = u.telegram_id 
+        WHERE a.status IN ('pending', 'confirmed')
+        ORDER BY a.appointment_date, a.appointment_time
+    """, fetch_all=True)
+    if not appointments:
+        await callback.message.edit_text("Нет активных записей.", reply_markup=admin_keyboard())
+        return
+    text = "📋 *Все активные записи:*\n\n"
+    for app in appointments:
+        text += f"📅 {app['appointment_date']} {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n\n"
+    await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
-    # Запускаем фоновую задачу в том же цикле
-    loop = asyncio.get_event_loop()
-    loop.create_task(match_checker(app))
+async def admin_pending_reviews(callback: CallbackQuery):
+    await callback.message.edit_text("Выберите отзыв для модерации:", reply_markup=pending_reviews_keyboard())
 
-    print("🚀 Бот запущен! Откройте Telegram и отправьте /start")
-    app.run_polling()
+async def review_detail(callback: CallbackQuery):
+    review_id = int(callback.data.split("_")[1])
+    review = db_query("SELECT text, photo_file_id, user_id FROM reviews WHERE id=?", (review_id,), fetch_one=True)
+    if not review:
+        await callback.answer("Отзыв не найден", show_alert=True)
+        return
+    user = db_query("SELECT full_name, username FROM users WHERE telegram_id=?", (review['user_id'],), fetch_one=True)
+    name = user['full_name'] or user['username'] or "Клиент"
+    text = f"✍️ *Отзыв от {name}*\n\n{review['text']}"
+    if review['photo_file_id']:
+        await callback.message.answer_photo(photo=review['photo_file_id'], caption=text, parse_mode="Markdown")
+    else:
+        await callback.message.answer(text, parse_mode="Markdown")
+    await callback.message.answer("Что делаем с отзывом?", reply_markup=review_action_keyboard(review_id))
+
+async def publish_review(callback: CallbackQuery):
+    review_id = int(callback.data.split("_")[2])
+    review = db_query("SELECT text, photo_file_id, user_id FROM reviews WHERE id=?", (review_id,), fetch_one=True)
+    if not review:
+        await callback.answer("Отзыв не найден", show_alert=True)
+        return
+    db_query("UPDATE reviews SET status='published', published_at=CURRENT_TIMESTAMP WHERE id=?", (review_id,))
+    user = db_query("SELECT full_name FROM users WHERE telegram_id=?", (review['user_id'],), fetch_one=True)
+    name = user['full_name'] if user else "Клиент"
+    caption = f"⭐ *Отзыв от {name}*\n\n{review['text']}"
+    try:
+        if review['photo_file_id']:
+            await callback.bot.send_photo(chat_id=REVIEW_CHANNEL_ID, photo=review['photo_file_id'], caption=caption, parse_mode="Markdown")
+        else:
+            await callback.bot.send_message(chat_id=REVIEW_CHANNEL_ID, text=caption, parse_mode="Markdown")
+        await callback.message.answer("✅ Отзыв опубликован в канале.")
+    except Exception as e:
+        logger.error(f"Ошибка публикации в канал: {e}")
+        await callback.message.answer("❌ Не удалось опубликовать отзыв. Проверьте права бота в канале.")
+        return
+    await callback.message.edit_text("Модерация завершена.", reply_markup=admin_keyboard())
+
+async def reject_review(callback: CallbackQuery):
+    review_id = int(callback.data.split("_")[2])
+    db_query("UPDATE reviews SET status='rejected' WHERE id=?", (review_id,))
+    await callback.message.answer("❌ Отзыв отклонён.")
+    await callback.message.edit_text("Модерация завершена.", reply_markup=admin_keyboard())
+
+# ==================== ЗАПУСК ====================
+async def main():
+    init_db()
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+
+    dp.message.register(start_command, Command("start"))
+    dp.message.register(cancel_booking, Command("cancel"))
+    dp.message.register(admin_command, Command("admin"))
+    dp.callback_query.register(main_menu_callback, F.data.in_({"book", "services", "my_appointments", "reviews", "back_main", "back_admin"}))
+    dp.callback_query.register(admin_today, F.data == "admin_today")
+    dp.callback_query.register(admin_tomorrow, F.data == "admin_tomorrow")
+    dp.callback_query.register(admin_all, F.data == "admin_all")
+    dp.callback_query.register(admin_pending_reviews, F.data == "admin_pending_reviews")
+    dp.callback_query.register(review_detail, F.data.startswith("review_"))
+    dp.callback_query.register(publish_review, F.data.startswith("publish_review_"))
+    dp.callback_query.register(reject_review, F.data.startswith("reject_review_"))
+    dp.callback_query.register(service_chosen, F.data.startswith("service_"))
+    dp.callback_query.register(time_chosen, F.data.startswith("time_"))
+    dp.message.register(date_chosen, BookingState.choosing_date)
+    dp.message.register(phone_entered, BookingState.entering_phone)
+
+    print("🚀 Бот запущен!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

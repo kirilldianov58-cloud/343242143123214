@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram-бот для визажиста
-Версия: 2.0 – добавлены имя/телефон, часовой пояс Читы
+Версия: 3.1 – кастомные эмодзи в тексте, отладка админ-панели
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from datetime import datetime, date, timedelta
 import pytz
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -22,13 +22,20 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "8615339487:AAE34fezdBoQ1Dof5eoCzZi4bAwMpSrdrY0"
 ADMIN_IDS = [6298119477]          # ЗАМЕНИТЕ НА СВОЙ ID
-REVIEW_CHANNEL_ID = -1003884818442  # ЗАМЕНИТЕ НА ID КАНАЛА
+REVIEW_CHANNEL_ID = -1003884818442  # ЗАМЕНИТЕ НА ID КАНАЛА (отрицательное число)
 
 WORK_START_HOUR = 10
 WORK_END_HOUR = 20
 WORK_DAYS = [0, 1, 2, 3, 4, 5, 6]  # 0=пн, 1=вт, ..., 6=вс
 
 CHITA_TZ = pytz.timezone("Asia/Chita")
+
+# ==================== КАСТОМНЫЕ ЭМОДЗИ ====================
+EMOJI_CHECKMARK = '<tg-emoji emoji-id="5262832270573582269">✅</tg-emoji>'
+EMOJI_CLOCK = '<tg-emoji emoji-id="5258258882022612173">⏰</tg-emoji>'
+EMOJI_CALENDAR = '<tg-emoji emoji-id="5258105663359294787">📅</tg-emoji>'
+EMOJI_BULLET = '<tg-emoji emoji-id="4918327330239152795">•</tg-emoji>'
+EMOJI_PHONE = '<tg-emoji emoji-id="5467539229468793355">📞</tg-emoji>'
 
 # ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(level=logging.INFO)
@@ -139,6 +146,8 @@ def main_menu_keyboard():
     builder.button(text="💇‍♀️ Услуги", callback_data="services")
     builder.button(text="📋 Мои записи", callback_data="my_appointments")
     builder.button(text="⭐ Отзывы", callback_data="reviews")
+    builder.button(text="📝 Оставить отзыв", callback_data="write_review")
+    builder.button(text="📱 Канал с отзывами", callback_data="reviews_channel")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -180,10 +189,17 @@ def review_action_keyboard(review_id):
     builder.adjust(2)
     return builder.as_markup()
 
-# ==================== ОБРАБОТЧИКИ ====================
+def channel_link_keyboard():
+    # Если у канала есть публичная ссылка, замените:
+    channel_url = f"https://t.me/c/{str(REVIEW_CHANNEL_ID)[4:]}"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Открыть канал с отзывами", url=channel_url)]
+    ])
+
+# ==================== ОБЩИЕ ОБРАБОТЧИКИ ====================
 async def cancel_booking(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ Бронирование отменено.", reply_markup=main_menu_keyboard())
+    await message.answer(f"{EMOJI_CHECKMARK} Бронирование отменено.", reply_markup=main_menu_keyboard())
 
 async def start_command(message: Message, state: FSMContext):
     await state.clear()
@@ -193,7 +209,7 @@ async def start_command(message: Message, state: FSMContext):
     db_query("INSERT OR IGNORE INTO users (telegram_id, username, full_name) VALUES (?, ?, ?)",
              (user_id, username, full_name))
     await message.answer(
-        "✨ Добро пожаловать! ✨\n\n"
+        f"{EMOJI_CHECKMARK} Добро пожаловать! {EMOJI_CHECKMARK}\n\n"
         "Я бот визажиста. Вы можете записаться на услуги.\n\n"
         "Выберите действие:",
         reply_markup=main_menu_keyboard()
@@ -209,6 +225,10 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
         await show_my_appointments(callback.message, callback.from_user.id)
     elif callback.data == "reviews":
         await show_reviews(callback.message)
+    elif callback.data == "write_review":
+        await start_review(callback.message, state)
+    elif callback.data == "reviews_channel":
+        await send_reviews_channel_link(callback.message)
     elif callback.data == "back_main":
         await callback.message.edit_text("Выберите действие:", reply_markup=main_menu_keyboard())
     elif callback.data == "back_admin":
@@ -218,7 +238,7 @@ async def show_services(message: Message):
     services = db_query("SELECT name, price FROM services", fetch_all=True)
     text = "💇‍♀️ *Наши услуги:*\n\n"
     for s in services:
-        text += f"• {s['name']} — {s['price']} ₽\n"
+        text += f"{EMOJI_BULLET} {s['name']} — {s['price']} ₽\n"
     await message.answer(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 async def show_my_appointments(message: Message, user_id: int):
@@ -232,9 +252,9 @@ async def show_my_appointments(message: Message, user_id: int):
     if not appointments:
         await message.answer("У вас пока нет активных записей.", reply_markup=main_menu_keyboard())
         return
-    text = "📋 *Ваши записи:*\n\n"
+    text = f"{EMOJI_CALENDAR} *Ваши записи:*\n\n"
     for app in appointments:
-        text += f"🗓 {app['appointment_date']} {app['appointment_time']}\n"
+        text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']}\n"
         text += f"💇 {app['service_name']}\n"
         text += f"Статус: {app['status']}\n\n"
     await message.answer(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
@@ -258,6 +278,63 @@ async def show_reviews(message: Message):
             await message.answer(text_review, parse_mode="Markdown")
     await message.answer("Выберите действие:", reply_markup=main_menu_keyboard())
 
+# ==================== ОТЗЫВЫ (СБОР) ====================
+async def start_review(message: Message, state: FSMContext):
+    await state.set_state(ReviewState.waiting_for_text)
+    await message.answer(
+        "✍️ Напишите ваш отзыв о работе визажиста.\n\n"
+        "Вы можете поделиться впечатлениями, а после этого прикрепить фото (необязательно)."
+    )
+
+async def review_text_received(message: Message, state: FSMContext):
+    await state.update_data(review_text=message.text)
+    await message.answer("📸 Теперь отправьте фото результата (или нажмите /skip, чтобы пропустить).")
+    await state.set_state(ReviewState.waiting_for_photo)
+
+async def review_photo_received(message: Message, state: FSMContext):
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        await state.update_data(photo_file_id=file_id)
+    else:
+        await state.update_data(photo_file_id=None)
+
+    data = await state.get_data()
+    user_id = message.from_user.id
+
+    db_query("""
+        INSERT INTO reviews (user_id, text, photo_file_id, status)
+        VALUES (?, ?, ?, 'pending')
+    """, (user_id, data['review_text'], data.get('photo_file_id')))
+
+    await message.answer(
+        f"{EMOJI_CHECKMARK} Спасибо! Ваш отзыв отправлен на модерацию и будет опубликован после проверки.",
+        reply_markup=main_menu_keyboard()
+    )
+    await state.clear()
+
+async def review_skip_photo(message: Message, state: FSMContext):
+    if message.text == "/skip":
+        await state.update_data(photo_file_id=None)
+        data = await state.get_data()
+        user_id = message.from_user.id
+        db_query("""
+            INSERT INTO reviews (user_id, text, photo_file_id, status)
+            VALUES (?, ?, ?, 'pending')
+        """, (user_id, data['review_text'], None))
+        await message.answer(
+            f"{EMOJI_CHECKMARK} Спасибо! Ваш отзыв отправлен на модерацию.",
+            reply_markup=main_menu_keyboard()
+        )
+        await state.clear()
+    else:
+        pass
+
+async def send_reviews_channel_link(message: Message):
+    await message.answer(
+        "📢 Здесь публикуются отзывы наших клиентов после модерации.",
+        reply_markup=channel_link_keyboard()
+    )
+
 # ==================== БРОНИРОВАНИЕ (FSM) ====================
 async def start_booking(message: Message, state: FSMContext):
     services = db_query("SELECT id, name FROM services", fetch_all=True)
@@ -277,8 +354,8 @@ async def service_chosen(callback: CallbackQuery, state: FSMContext):
     service_id = int(callback.data.split("_")[1])
     await state.update_data(service_id=service_id)
     await callback.message.edit_text(
-        "Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2025):\n"
-        "⏰ Время будет указано по Чите (UTC+9)"
+        f"{EMOJI_CALENDAR} Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2025):\n"
+        f"{EMOJI_CLOCK} Время будет указано по Чите (UTC+9)"
     )
     await state.set_state(BookingState.choosing_date)
 
@@ -305,7 +382,7 @@ async def date_chosen(message: Message, state: FSMContext):
         builder.button(text=t, callback_data=f"time_{t}")
     builder.button(text="🔙 Назад", callback_data="back_main")
     await message.answer(
-        f"Выберите время (по Чите):\nДоступные слоты: {WORK_START_HOUR}:00 – {WORK_END_HOUR-1}:00",
+        f"{EMOJI_CLOCK} Выберите время (по Чите):\nДоступные слоты: {WORK_START_HOUR}:00 – {WORK_END_HOUR-1}:00",
         reply_markup=builder.as_markup()
     )
     await state.set_state(BookingState.choosing_time)
@@ -323,7 +400,7 @@ async def name_entered(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите имя.")
         return
     await state.update_data(name=name)
-    await message.answer("Введите ваш номер телефона для связи:")
+    await message.answer(f"{EMOJI_PHONE} Введите ваш номер телефона для связи:")
     await state.set_state(BookingState.entering_phone)
 
 async def phone_entered(message: Message, state: FSMContext):
@@ -335,16 +412,16 @@ async def phone_entered(message: Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
 
-    # Обновляем имя и телефон в таблице users
     db_query("UPDATE users SET full_name=?, phone=? WHERE telegram_id=?", (data['name'], phone, user_id))
-
-    # Создаём запись
     db_query("""
         INSERT INTO appointments (user_id, service_id, appointment_date, appointment_time)
         VALUES (?, ?, ?, ?)
     """, (user_id, data['service_id'], data['date'], data['time']))
 
-    await message.answer("✅ Ваша запись создана! Ожидайте подтверждения администратора.", reply_markup=main_menu_keyboard())
+    await message.answer(
+        f"{EMOJI_CHECKMARK} Ваша запись создана! Ожидайте подтверждения администратора.",
+        reply_markup=main_menu_keyboard()
+    )
     await state.clear()
 
     # Уведомление администратору
@@ -352,10 +429,10 @@ async def phone_entered(message: Message, state: FSMContext):
         try:
             await message.bot.send_message(
                 admin_id,
-                f"📅 Новая запись от {data['name']}\n"
-                f"📞 {phone}\n"
+                f"{EMOJI_CALENDAR} Новая запись от {data['name']}\n"
+                f"{EMOJI_PHONE} {phone}\n"
                 f"Услуга: {db_query('SELECT name FROM services WHERE id=?', (data['service_id'],), fetch_one=True)['name']}\n"
-                f"Дата: {data['date']} {data['time']} (Чита)"
+                f"Дата: {data['date']} {EMOJI_CLOCK} {data['time']} (Чита)"
             )
         except Exception as e:
             logger.error(f"Ошибка отправки админу {admin_id}: {e}")
@@ -369,6 +446,7 @@ async def admin_command(message: Message):
 
 async def admin_today(callback: CallbackQuery):
     today_str = date.today().strftime("%d.%m.%Y")
+    logger.info(f"Запрос записей на {today_str}")
     appointments = db_query("""
         SELECT a.appointment_time, s.name as service_name, u.full_name, u.phone
         FROM appointments a 
@@ -377,16 +455,20 @@ async def admin_today(callback: CallbackQuery):
         WHERE a.appointment_date=? AND a.status!='completed'
         ORDER BY a.appointment_time
     """, (today_str,), fetch_all=True)
+    logger.info(f"Найдено записей: {len(appointments)}")
     if not appointments:
         await callback.message.edit_text(f"На сегодня ({today_str}) записей нет.", reply_markup=admin_keyboard())
         return
-    text = f"📅 *Записи на {today_str}:*\n\n"
+    text = f"{EMOJI_CALENDAR} *Записи на {today_str}:*\n\n"
     for app in appointments:
-        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n📞 {app['phone']}\n\n"
+        text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
+        text += f"👤 {app['full_name']}\n"
+        text += f"{EMOJI_PHONE} {app['phone']}\n\n"
     await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
 async def admin_tomorrow(callback: CallbackQuery):
     tomorrow_str = (date.today() + timedelta(days=1)).strftime("%d.%m.%Y")
+    logger.info(f"Запрос записей на {tomorrow_str}")
     appointments = db_query("""
         SELECT a.appointment_time, s.name as service_name, u.full_name, u.phone
         FROM appointments a 
@@ -395,12 +477,15 @@ async def admin_tomorrow(callback: CallbackQuery):
         WHERE a.appointment_date=? AND a.status!='completed'
         ORDER BY a.appointment_time
     """, (tomorrow_str,), fetch_all=True)
+    logger.info(f"Найдено записей: {len(appointments)}")
     if not appointments:
         await callback.message.edit_text(f"На завтра ({tomorrow_str}) записей нет.", reply_markup=admin_keyboard())
         return
-    text = f"📅 *Записи на {tomorrow_str}:*\n\n"
+    text = f"{EMOJI_CALENDAR} *Записи на {tomorrow_str}:*\n\n"
     for app in appointments:
-        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n📞 {app['phone']}\n\n"
+        text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
+        text += f"👤 {app['full_name']}\n"
+        text += f"{EMOJI_PHONE} {app['phone']}\n\n"
     await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
 async def admin_all(callback: CallbackQuery):
@@ -415,9 +500,11 @@ async def admin_all(callback: CallbackQuery):
     if not appointments:
         await callback.message.edit_text("Нет активных записей.", reply_markup=admin_keyboard())
         return
-    text = "📋 *Все активные записи:*\n\n"
+    text = f"{EMOJI_CALENDAR} *Все активные записи:*\n\n"
     for app in appointments:
-        text += f"📅 {app['appointment_date']} {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n📞 {app['phone']}\n\n"
+        text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
+        text += f"👤 {app['full_name']}\n"
+        text += f"{EMOJI_PHONE} {app['phone']}\n\n"
     await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
 async def admin_pending_reviews(callback: CallbackQuery):
@@ -476,7 +563,7 @@ async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(cancel_booking, Command("cancel"))
     dp.message.register(admin_command, Command("admin"))
-    dp.callback_query.register(main_menu_callback, F.data.in_({"book", "services", "my_appointments", "reviews", "back_main", "back_admin"}))
+    dp.callback_query.register(main_menu_callback, F.data.in_({"book", "services", "my_appointments", "reviews", "write_review", "reviews_channel", "back_main", "back_admin"}))
     dp.callback_query.register(admin_today, F.data == "admin_today")
     dp.callback_query.register(admin_tomorrow, F.data == "admin_tomorrow")
     dp.callback_query.register(admin_all, F.data == "admin_all")
@@ -489,6 +576,9 @@ async def main():
     dp.message.register(date_chosen, BookingState.choosing_date)
     dp.message.register(name_entered, BookingState.choosing_name)
     dp.message.register(phone_entered, BookingState.entering_phone)
+    dp.message.register(review_text_received, ReviewState.waiting_for_text)
+    dp.message.register(review_photo_received, ReviewState.waiting_for_photo, F.photo)
+    dp.message.register(review_skip_photo, ReviewState.waiting_for_photo, Command("skip"))
 
     print("🚀 Бот запущен!")
     await dp.start_polling(bot)

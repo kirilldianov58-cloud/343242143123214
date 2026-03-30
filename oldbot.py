@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram-бот для визажиста
-Версия: 7.0 – восстановлены эмодзи, исправлена кнопка "Услуги"
+Версия: 7.1 – исправлена кнопка "Услуги" (без HTML)
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "8615339487:AAE34fezdBoQ1Dof5eoCzZi4bAwMpSrdrY0"
-ADMIN_IDS = [6298119477 ]          # ЗАМЕНИТЕ НА СВОЙ ID
+ADMIN_IDS = [6298119477]          # ЗАМЕНИТЕ НА СВОЙ ID
 REVIEW_CHANNEL_ID = -1003884818442  # ЗАМЕНИТЕ НА ID КАНАЛА
 
 WORK_START_HOUR = 10
@@ -276,10 +276,10 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
 
 async def show_services(callback: CallbackQuery):
     services = db_query("SELECT name, price FROM services", fetch_all=True)
-    text = "💇‍♀️ <b>Наши услуги:</b>\n\n"
+    text = "💇‍♀️ Наши услуги:\n\n"
     for s in services:
-        text += f"{EMOJI_BULLET} {s['name']} — {s['price']} ₽\n"
-    await send_or_edit_message(callback, text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+        text += f"• {s['name']} — {s['price']} ₽\n"
+    await send_or_edit_message(callback, text, parse_mode=None, reply_markup=main_menu_keyboard())
 
 async def show_my_appointments(callback: CallbackQuery, user_id: int):
     appointments = db_query("""
@@ -292,7 +292,7 @@ async def show_my_appointments(callback: CallbackQuery, user_id: int):
     if not appointments:
         await send_or_edit_message(callback, "У вас пока нет активных записей.", parse_mode="HTML", reply_markup=main_menu_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Ваши записи:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Ваши записи:\n\n"
     for app in appointments:
         text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']}\n"
         text += f"💇 {app['service_name']}\n"
@@ -310,9 +310,9 @@ async def show_reviews(callback: CallbackQuery):
     if not reviews:
         await send_or_edit_message(callback, "Пока нет отзывов. Станьте первым!", parse_mode="HTML", reply_markup=main_menu_keyboard())
         return
-    text = "⭐ <b>Последние отзывы:</b>\n\n"
+    text = "⭐ Последние отзывы:\n\n"
     for r in reviews:
-        text += f"⭐ <b>{r['full_name']}</b>\n{r['text']}\n\n"
+        text += f"⭐ {r['full_name']}\n{r['text']}\n\n"
         if r['photo_file_id']:
             # фото отправляем отдельно, но для простоты пока опускаем
             pass
@@ -524,7 +524,7 @@ async def admin_today(callback: CallbackQuery):
     if not appointments:
         await callback.message.edit_text(f"На сегодня ({today_str}) записей нет.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Записи на {today_str}:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Записи на {today_str}:\n\n"
     for app in appointments:
         text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
@@ -544,7 +544,7 @@ async def admin_tomorrow(callback: CallbackQuery):
     if not appointments:
         await callback.message.edit_text(f"На завтра ({tomorrow_str}) записей нет.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Записи на {tomorrow_str}:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Записи на {tomorrow_str}:\n\n"
     for app in appointments:
         text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
@@ -563,7 +563,7 @@ async def admin_all(callback: CallbackQuery):
     if not appointments:
         await callback.message.edit_text("Нет активных записей.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Все активные записи:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Все активные записи:\n\n"
     for app in appointments:
         text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
@@ -581,7 +581,7 @@ async def review_detail(callback: CallbackQuery):
         return
     user = db_query("SELECT full_name, username FROM users WHERE telegram_id=?", (review['user_id'],), fetch_one=True)
     name = user['full_name'] or user['username'] or "Клиент"
-    text = f"✍️ <b>Отзыв от {name}</b>\n\n{review['text']}"
+    text = f"✍️ Отзыв от {name}\n\n{review['text']}"
     if review['photo_file_id']:
         await callback.message.answer_photo(photo=review['photo_file_id'], caption=text, parse_mode="HTML")
     else:
@@ -597,7 +597,7 @@ async def publish_review(callback: CallbackQuery):
     db_query("UPDATE reviews SET status='published', published_at=CURRENT_TIMESTAMP WHERE id=?", (review_id,))
     user = db_query("SELECT full_name FROM users WHERE telegram_id=?", (review['user_id'],), fetch_one=True)
     name = user['full_name'] if user else "Клиент"
-    caption = f"⭐ <b>Отзыв от {name}</b>\n\n{review['text']}"
+    caption = f"⭐ Отзыв от {name}\n\n{review['text']}"
     try:
         if review['photo_file_id']:
             await callback.bot.send_photo(chat_id=REVIEW_CHANNEL_ID, photo=review['photo_file_id'], caption=caption, parse_mode="HTML")
@@ -640,11 +640,4 @@ async def main():
     dp.message.register(name_entered, BookingState.choosing_name)
     dp.message.register(phone_entered, BookingState.entering_phone)
     dp.message.register(review_text_received, ReviewState.waiting_for_text)
-    dp.message.register(review_photo_received, ReviewState.waiting_for_photo, F.photo)
-    dp.message.register(review_skip_photo, ReviewState.waiting_for_photo, Command("skip"))
-
-    print("🚀 Бот запущен!")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    dp.message

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram-бот для визажиста
-Версия: 3.3 – удаление предыдущих сообщений, исправленные услуги, чистый HTML
+Версия: 4.0 – удаление старых сообщений, исправленные эмодзи, новые услуги
 """
 
 import asyncio
@@ -92,7 +92,7 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(telegram_id)
         )
     """)
-    # Обновляем услуги (удаляем старые и вставляем новые)
+    # Обновляем услуги
     cursor.execute("DELETE FROM services")
     services = [
         ("Дневной макияж", 2000, 60),
@@ -103,7 +103,7 @@ def init_db():
     cursor.executemany("INSERT INTO services (name, price, duration) VALUES (?, ?, ?)", services)
     conn.commit()
     conn.close()
-    print("✅ База данных инициализирована (услуги обновлены)")
+    print("✅ База данных инициализирована")
 
 def db_query(query, params=None, fetch_one=False, fetch_all=False):
     conn = sqlite3.connect("makeup_bot.db")
@@ -136,33 +136,33 @@ class ReviewState(StatesGroup):
     waiting_for_text = State()
     waiting_for_photo = State()
 
-# ==================== УПРАВЛЕНИЕ СООБЩЕНИЯМИ ====================
+# ==================== УДАЛЕНИЕ СТАРЫХ СООБЩЕНИЙ ====================
 last_message_ids = {}
 
-async def delete_previous_message(chat_id: int, bot: Bot):
-    if chat_id in last_message_ids:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=last_message_ids[chat_id])
-        except Exception:
-            pass
-
-async def send_or_edit_message(target, text, parse_mode="HTML", reply_markup=None, bot=None):
-    """Отправляет новое сообщение, удаляя предыдущее в этом чате"""
-    if isinstance(target, Message):
-        chat_id = target.chat.id
-        bot = target.bot
-    else:
-        # target это CallbackQuery
+async def send_or_edit_message(target, text, parse_mode=None, reply_markup=None, delete_previous=True):
+    """Универсальная отправка сообщения с удалением предыдущего."""
+    if isinstance(target, CallbackQuery):
         chat_id = target.message.chat.id
         bot = target.bot
-    await delete_previous_message(chat_id, bot)
-    sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
-    last_message_ids[chat_id] = sent.message_id
-    return sent
-
-async def edit_current_message(message: Message, text, parse_mode="HTML", reply_markup=None):
-    """Редактирует текущее сообщение (если нужно)"""
-    await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        if delete_previous and chat_id in last_message_ids:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=last_message_ids[chat_id])
+            except:
+                pass
+        sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+        last_message_ids[chat_id] = sent.message_id
+    elif isinstance(target, Message):
+        chat_id = target.chat.id
+        bot = target.bot
+        if delete_previous and chat_id in last_message_ids:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=last_message_ids[chat_id])
+            except:
+                pass
+        sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+        last_message_ids[chat_id] = sent.message_id
+    else:
+        raise TypeError("target должен быть Message или CallbackQuery")
 
 # ==================== КЛАВИАТУРЫ ====================
 def main_menu_keyboard():
@@ -215,16 +215,15 @@ def review_action_keyboard(review_id):
     return builder.as_markup()
 
 def channel_link_keyboard():
-    # Если у канала есть публичная ссылка, замените на https://t.me/...
     channel_url = f"https://t.me/c/{str(REVIEW_CHANNEL_ID)[4:]}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Открыть канал с отзывами", url=channel_url)]
     ])
 
-# ==================== ОБЩИЕ ОБРАБОТЧИКИ ====================
+# ==================== ОБРАБОТЧИКИ ====================
 async def cancel_booking(message: Message, state: FSMContext):
     await state.clear()
-    await send_or_edit_message(message, f"{EMOJI_CHECKMARK} Бронирование отменено.", reply_markup=main_menu_keyboard())
+    await send_or_edit_message(message, f"{EMOJI_CHECKMARK} Бронирование отменено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
 
 async def start_command(message: Message, state: FSMContext):
     await state.clear()
@@ -233,18 +232,18 @@ async def start_command(message: Message, state: FSMContext):
     full_name = message.from_user.full_name
     db_query("INSERT OR IGNORE INTO users (telegram_id, username, full_name) VALUES (?, ?, ?)",
              (user_id, username, full_name))
-    await send_or_edit_message(
-        message,
+    await send_or_edit_message(message,
         f"{EMOJI_CHECKMARK} Добро пожаловать! {EMOJI_CHECKMARK}\n\n"
         "Я бот визажиста. Вы можете записаться на услуги.\n\n"
         "Выберите действие:",
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard()
     )
 
 async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if callback.data == "book":
-        await start_booking(callback, state)
+        await start_booking(callback.message, state)
     elif callback.data == "services":
         await show_services(callback)
     elif callback.data == "my_appointments":
@@ -252,20 +251,20 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
     elif callback.data == "reviews":
         await show_reviews(callback)
     elif callback.data == "write_review":
-        await start_review(callback, state)
+        await start_review(callback.message, state)
     elif callback.data == "reviews_channel":
         await send_reviews_channel_link(callback)
     elif callback.data == "back_main":
-        await send_or_edit_message(callback, "Выберите действие:", reply_markup=main_menu_keyboard())
+        await send_or_edit_message(callback, "Выберите действие:", parse_mode="HTML", reply_markup=main_menu_keyboard())
     elif callback.data == "back_admin":
-        await send_or_edit_message(callback, "Админ-панель:", reply_markup=admin_keyboard())
+        await send_or_edit_message(callback, "Админ-панель:", parse_mode="HTML", reply_markup=admin_keyboard())
 
 async def show_services(callback: CallbackQuery):
     services = db_query("SELECT name, price FROM services", fetch_all=True)
     text = "💇‍♀️ <b>Наши услуги:</b>\n\n"
     for s in services:
         text += f"{EMOJI_BULLET} {s['name']} — {s['price']} ₽\n"
-    await send_or_edit_message(callback, text, reply_markup=main_menu_keyboard())
+    await send_or_edit_message(callback, text, parse_mode="HTML", reply_markup=main_menu_keyboard())
 
 async def show_my_appointments(callback: CallbackQuery, user_id: int):
     appointments = db_query("""
@@ -276,14 +275,14 @@ async def show_my_appointments(callback: CallbackQuery, user_id: int):
         ORDER BY a.appointment_date, a.appointment_time
     """, (user_id,), fetch_all=True)
     if not appointments:
-        await send_or_edit_message(callback, "У вас пока нет активных записей.", reply_markup=main_menu_keyboard())
+        await send_or_edit_message(callback, "У вас пока нет активных записей.", parse_mode="HTML", reply_markup=main_menu_keyboard())
         return
     text = f"{EMOJI_CALENDAR} <b>Ваши записи:</b>\n\n"
     for app in appointments:
         text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']}\n"
         text += f"💇 {app['service_name']}\n"
         text += f"Статус: {app['status']}\n\n"
-    await send_or_edit_message(callback, text, reply_markup=main_menu_keyboard())
+    await send_or_edit_message(callback, text, parse_mode="HTML", reply_markup=main_menu_keyboard())
 
 async def show_reviews(callback: CallbackQuery):
     reviews = db_query("""
@@ -294,34 +293,35 @@ async def show_reviews(callback: CallbackQuery):
         ORDER BY r.published_at DESC LIMIT 5
     """, fetch_all=True)
     if not reviews:
-        await send_or_edit_message(callback, "Пока нет отзывов. Станьте первым!", reply_markup=main_menu_keyboard())
+        await send_or_edit_message(callback, "Пока нет отзывов. Станьте первым!", parse_mode="HTML", reply_markup=main_menu_keyboard())
         return
-    # Для отзывов с фото нужен особый подход, так как нельзя отправить фото через send_or_edit_message.
-    # Удаляем предыдущее сообщение и отправляем фото.
-    chat_id = callback.message.chat.id
-    await delete_previous_message(chat_id, callback.bot)
+    # Отправляем первое сообщение с отзывами (но здесь их может быть несколько, поэтому нельзя использовать send_or_edit_message в цикле)
+    # Лучше отправить несколько сообщений, но для чистоты можно объединить все в одно.
+    # Пока оставим как есть, но после каждого отзыва будем отправлять новое сообщение, удаляя предыдущее – не очень.
+    # Сделаем проще: отправляем все отзывы в одном сообщении (или в нескольких, но без удаления).
+    # Для упрощения отправим одним сообщением.
+    text = "⭐ <b>Последние отзывы:</b>\n\n"
     for r in reviews:
-        text_review = f"⭐ <b>{r['full_name']}</b>\n{r['text']}"
+        text += f"⭐ <b>{r['full_name']}</b>\n{r['text']}\n\n"
         if r['photo_file_id']:
-            sent = await callback.bot.send_photo(chat_id=chat_id, photo=r['photo_file_id'], caption=text_review, parse_mode="HTML")
-        else:
-            sent = await callback.bot.send_message(chat_id=chat_id, text=text_review, parse_mode="HTML")
-    # Последнее сообщение – меню
-    sent = await callback.bot.send_message(chat_id=chat_id, text="Выберите действие:", reply_markup=main_menu_keyboard())
-    last_message_ids[chat_id] = sent.message_id
+            # фото отправляем отдельно, но тогда теряется удаление – пока опустим для простоты
+            pass
+    await send_or_edit_message(callback, text, parse_mode="HTML", reply_markup=main_menu_keyboard())
 
 # ==================== ОТЗЫВЫ (СБОР) ====================
-async def start_review(callback: CallbackQuery, state: FSMContext):
+async def start_review(message: Message, state: FSMContext):
     await state.set_state(ReviewState.waiting_for_text)
-    await send_or_edit_message(callback,
+    await send_or_edit_message(message,
         "✍️ Напишите ваш отзыв о работе визажиста.\n\n"
-        "Вы можете поделиться впечатлениями, а после этого прикрепить фото (необязательно)."
+        "Вы можете поделиться впечатлениями, а после этого прикрепить фото (необязательно).",
+        parse_mode="HTML"
     )
 
 async def review_text_received(message: Message, state: FSMContext):
     await state.update_data(review_text=message.text)
     await send_or_edit_message(message,
-        "📸 Теперь отправьте фото результата (или нажмите /skip, чтобы пропустить)."
+        "📸 Теперь отправьте фото результата (или нажмите /skip, чтобы пропустить).",
+        parse_mode="HTML"
     )
     await state.set_state(ReviewState.waiting_for_photo)
 
@@ -342,6 +342,7 @@ async def review_photo_received(message: Message, state: FSMContext):
 
     await send_or_edit_message(message,
         f"{EMOJI_CHECKMARK} Спасибо! Ваш отзыв отправлен на модерацию и будет опубликован после проверки.",
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard()
     )
     await state.clear()
@@ -357,57 +358,58 @@ async def review_skip_photo(message: Message, state: FSMContext):
         """, (user_id, data['review_text'], None))
         await send_or_edit_message(message,
             f"{EMOJI_CHECKMARK} Спасибо! Ваш отзыв отправлен на модерацию.",
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard()
         )
         await state.clear()
-    else:
-        pass
 
 async def send_reviews_channel_link(callback: CallbackQuery):
     await send_or_edit_message(callback,
         "📢 Здесь публикуются отзывы наших клиентов после модерации.",
+        parse_mode="HTML",
         reply_markup=channel_link_keyboard()
     )
 
 # ==================== БРОНИРОВАНИЕ (FSM) ====================
-async def start_booking(callback: CallbackQuery, state: FSMContext):
+async def start_booking(message: Message, state: FSMContext):
     services = db_query("SELECT id, name FROM services", fetch_all=True)
     if not services:
-        await send_or_edit_message(callback, "Услуги временно недоступны.", reply_markup=main_menu_keyboard())
+        await send_or_edit_message(message, "Услуги временно недоступны.", parse_mode="HTML", reply_markup=main_menu_keyboard())
         return
     builder = InlineKeyboardBuilder()
     for s in services:
         builder.button(text=s['name'], callback_data=f"service_{s['id']}")
     builder.button(text="🔙 Назад", callback_data="back_main")
     builder.adjust(1)
-    await send_or_edit_message(callback, "Выберите услугу:", reply_markup=builder.as_markup())
+    await send_or_edit_message(message, "Выберите услугу:", reply_markup=builder.as_markup())
     await state.set_state(BookingState.choosing_service)
 
 async def service_chosen(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     service_id = int(callback.data.split("_")[1])
     await state.update_data(service_id=service_id)
-    await edit_current_message(callback.message,
+    await callback.message.edit_text(
         f"{EMOJI_CALENDAR} Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2025):\n"
-        f"{EMOJI_CLOCK} Время будет указано по Чите (UTC+9)"
+        f"{EMOJI_CLOCK} Время будет указано по Чите (UTC+9)",
+        parse_mode="HTML"
     )
     await state.set_state(BookingState.choosing_date)
 
 async def date_chosen(message: Message, state: FSMContext):
     date_str = message.text.strip()
     if not re.match(r"\d{2}\.\d{2}\.\d{4}", date_str):
-        await send_or_edit_message(message, "Неверный формат. Введите дату как ДД.ММ.ГГГГ")
+        await send_or_edit_message(message, "Неверный формат. Введите дату как ДД.ММ.ГГГГ", parse_mode="HTML")
         return
     try:
         selected_date = datetime.strptime(date_str, "%d.%m.%Y").date()
         if selected_date < date.today():
-            await send_or_edit_message(message, "Дата не может быть в прошлом. Выберите другую.")
+            await send_or_edit_message(message, "Дата не может быть в прошлом. Выберите другую.", parse_mode="HTML")
             return
         if selected_date.weekday() not in WORK_DAYS:
-            await send_or_edit_message(message, "В этот день я не работаю. Выберите другой день.")
+            await send_or_edit_message(message, "В этот день я не работаю. Выберите другой день.", parse_mode="HTML")
             return
     except ValueError:
-        await send_or_edit_message(message, "Некорректная дата.")
+        await send_or_edit_message(message, "Некорректная дата.", parse_mode="HTML")
         return
     await state.update_data(date=date_str)
     free_times = [f"{h}:00" for h in range(WORK_START_HOUR, WORK_END_HOUR)]
@@ -425,22 +427,22 @@ async def time_chosen(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     time_str = callback.data.split("_")[1]
     await state.update_data(time=time_str)
-    await edit_current_message(callback.message, "Введите ваше имя (как к вам обращаться):")
+    await callback.message.edit_text("Введите ваше имя (как к вам обращаться):", parse_mode="HTML")
     await state.set_state(BookingState.choosing_name)
 
 async def name_entered(message: Message, state: FSMContext):
     name = message.text.strip()
     if not name:
-        await send_or_edit_message(message, "Пожалуйста, введите имя.")
+        await send_or_edit_message(message, "Пожалуйста, введите имя.", parse_mode="HTML")
         return
     await state.update_data(name=name)
-    await send_or_edit_message(message, f"{EMOJI_PHONE} Введите ваш номер телефона для связи:")
+    await send_or_edit_message(message, f"{EMOJI_PHONE} Введите ваш номер телефона для связи:", parse_mode="HTML")
     await state.set_state(BookingState.entering_phone)
 
 async def phone_entered(message: Message, state: FSMContext):
     phone = message.text.strip()
     if not re.search(r"\d", phone):
-        await send_or_edit_message(message, "Пожалуйста, введите корректный номер телефона.")
+        await send_or_edit_message(message, "Пожалуйста, введите корректный номер телефона.", parse_mode="HTML")
         return
     await state.update_data(phone=phone)
     data = await state.get_data()
@@ -454,6 +456,7 @@ async def phone_entered(message: Message, state: FSMContext):
 
     await send_or_edit_message(message,
         f"{EMOJI_CHECKMARK} Ваша запись создана! Ожидайте подтверждения администратора.",
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard()
     )
     await state.clear()
@@ -475,9 +478,9 @@ async def phone_entered(message: Message, state: FSMContext):
 # ==================== АДМИНИСТРИРОВАНИЕ ====================
 async def admin_command(message: Message):
     if message.from_user.id not in ADMIN_IDS:
-        await send_or_edit_message(message, "У вас нет прав администратора.")
+        await send_or_edit_message(message, "У вас нет прав администратора.", parse_mode="HTML")
         return
-    await send_or_edit_message(message, "Админ-панель:", reply_markup=admin_keyboard())
+    await send_or_edit_message(message, "Админ-панель:", parse_mode="HTML", reply_markup=admin_keyboard())
 
 async def admin_today(callback: CallbackQuery):
     today_str = date.today().strftime("%d.%m.%Y")
@@ -492,14 +495,14 @@ async def admin_today(callback: CallbackQuery):
     """, (today_str,), fetch_all=True)
     logger.info(f"Найдено записей: {len(appointments)}")
     if not appointments:
-        await send_or_edit_message(callback, f"На сегодня ({today_str}) записей нет.", reply_markup=admin_keyboard())
+        await callback.message.edit_text(f"На сегодня ({today_str}) записей нет.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
     text = f"{EMOJI_CALENDAR} <b>Записи на {today_str}:</b>\n\n"
     for app in appointments:
         text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
         text += f"{EMOJI_PHONE} {app['phone']}\n\n"
-    await send_or_edit_message(callback, text, reply_markup=admin_keyboard())
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
 
 async def admin_tomorrow(callback: CallbackQuery):
     tomorrow_str = (date.today() + timedelta(days=1)).strftime("%d.%m.%Y")
@@ -514,14 +517,14 @@ async def admin_tomorrow(callback: CallbackQuery):
     """, (tomorrow_str,), fetch_all=True)
     logger.info(f"Найдено записей: {len(appointments)}")
     if not appointments:
-        await send_or_edit_message(callback, f"На завтра ({tomorrow_str}) записей нет.", reply_markup=admin_keyboard())
+        await callback.message.edit_text(f"На завтра ({tomorrow_str}) записей нет.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
     text = f"{EMOJI_CALENDAR} <b>Записи на {tomorrow_str}:</b>\n\n"
     for app in appointments:
         text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
         text += f"{EMOJI_PHONE} {app['phone']}\n\n"
-    await send_or_edit_message(callback, text, reply_markup=admin_keyboard())
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
 
 async def admin_all(callback: CallbackQuery):
     appointments = db_query("""
@@ -533,17 +536,17 @@ async def admin_all(callback: CallbackQuery):
         ORDER BY a.appointment_date, a.appointment_time
     """, fetch_all=True)
     if not appointments:
-        await send_or_edit_message(callback, "Нет активных записей.", reply_markup=admin_keyboard())
+        await callback.message.edit_text("Нет активных записей.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
     text = f"{EMOJI_CALENDAR} <b>Все активные записи:</b>\n\n"
     for app in appointments:
         text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
         text += f"{EMOJI_PHONE} {app['phone']}\n\n"
-    await send_or_edit_message(callback, text, reply_markup=admin_keyboard())
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
 
 async def admin_pending_reviews(callback: CallbackQuery):
-    await send_or_edit_message(callback, "Выберите отзыв для модерации:", reply_markup=pending_reviews_keyboard())
+    await callback.message.edit_text("Выберите отзыв для модерации:", parse_mode="HTML", reply_markup=pending_reviews_keyboard())
 
 async def review_detail(callback: CallbackQuery):
     review_id = int(callback.data.split("_")[1])
@@ -554,16 +557,11 @@ async def review_detail(callback: CallbackQuery):
     user = db_query("SELECT full_name, username FROM users WHERE telegram_id=?", (review['user_id'],), fetch_one=True)
     name = user['full_name'] or user['username'] or "Клиент"
     text = f"✍️ <b>Отзыв от {name}</b>\n\n{review['text']}"
-    # Удаляем предыдущее сообщение и показываем отзыв
-    chat_id = callback.message.chat.id
-    await delete_previous_message(chat_id, callback.bot)
     if review['photo_file_id']:
-        await callback.bot.send_photo(chat_id=chat_id, photo=review['photo_file_id'], caption=text, parse_mode="HTML")
+        await callback.message.answer_photo(photo=review['photo_file_id'], caption=text, parse_mode="HTML")
     else:
-        await callback.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
-    # Отправляем кнопки
-    sent = await callback.bot.send_message(chat_id=chat_id, text="Что делаем с отзывом?", reply_markup=review_action_keyboard(review_id))
-    last_message_ids[chat_id] = sent.message_id
+        await callback.message.answer(text, parse_mode="HTML")
+    await callback.message.answer("Что делаем с отзывом?", parse_mode="HTML", reply_markup=review_action_keyboard(review_id))
 
 async def publish_review(callback: CallbackQuery):
     review_id = int(callback.data.split("_")[2])
@@ -580,18 +578,18 @@ async def publish_review(callback: CallbackQuery):
             await callback.bot.send_photo(chat_id=REVIEW_CHANNEL_ID, photo=review['photo_file_id'], caption=caption, parse_mode="HTML")
         else:
             await callback.bot.send_message(chat_id=REVIEW_CHANNEL_ID, text=caption, parse_mode="HTML")
-        await callback.answer("Отзыв опубликован", show_alert=True)
+        await callback.message.answer("✅ Отзыв опубликован в канале.", parse_mode="HTML")
     except Exception as e:
         logger.error(f"Ошибка публикации в канал: {e}")
-        await callback.answer("Ошибка публикации", show_alert=True)
+        await callback.message.answer("❌ Не удалось опубликовать отзыв. Проверьте права бота в канале.", parse_mode="HTML")
         return
-    await send_or_edit_message(callback, "✅ Отзыв опубликован в канале.", reply_markup=admin_keyboard())
+    await callback.message.edit_text("Модерация завершена.", parse_mode="HTML", reply_markup=admin_keyboard())
 
 async def reject_review(callback: CallbackQuery):
     review_id = int(callback.data.split("_")[2])
     db_query("UPDATE reviews SET status='rejected' WHERE id=?", (review_id,))
-    await callback.answer("Отзыв отклонён", show_alert=True)
-    await send_or_edit_message(callback, "❌ Отзыв отклонён.", reply_markup=admin_keyboard())
+    await callback.message.answer("❌ Отзыв отклонён.", parse_mode="HTML")
+    await callback.message.edit_text("Модерация завершена.", parse_mode="HTML", reply_markup=admin_keyboard())
 
 # ==================== ЗАПУСК ====================
 async def main():

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram-бот для визажиста
-Версия: 1.1 – исправлена ошибка с cancel_booking
+Версия: 2.0 – добавлены имя/телефон, часовой пояс Читы
 """
 
 import asyncio
@@ -9,23 +9,26 @@ import logging
 import sqlite3
 import re
 from datetime import datetime, date, timedelta
+import pytz
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ==================== КОНФИГУРАЦИЯ (ЗАМЕНИТЕ НА СВОИ) ====================
+# ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "8615339487:AAE34fezdBoQ1Dof5eoCzZi4bAwMpSrdrY0"
-ADMIN_IDS = [6298119477]  # Замените на свой Telegram ID
-REVIEW_CHANNEL_ID = -1003884818442  # Замените на ID канала
+ADMIN_IDS = [6298119477]          # ЗАМЕНИТЕ НА СВОЙ ID
+REVIEW_CHANNEL_ID = -1003884818442  # ЗАМЕНИТЕ НА ID КАНАЛА
 
 WORK_START_HOUR = 10
 WORK_END_HOUR = 20
-WORK_DAYS = [0, 1, 2, 3, 4, 5, 6]
+WORK_DAYS = [0, 1, 2, 3, 4, 5, 6]  # 0=пн, 1=вт, ..., 6=вс
+
+CHITA_TZ = pytz.timezone("Asia/Chita")
 
 # ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(level=logging.INFO)
@@ -122,6 +125,7 @@ class BookingState(StatesGroup):
     choosing_service = State()
     choosing_date = State()
     choosing_time = State()
+    choosing_name = State()
     entering_phone = State()
 
 class ReviewState(StatesGroup):
@@ -154,7 +158,7 @@ def services_keyboard():
     for s in services:
         builder.button(text=f"{s['name']} - {s['price']} ₽", callback_data=f"service_{s['id']}")
     builder.button(text="🔙 Назад", callback_data="back_main")
-    builder.adjust(1)
+    builder.adjust(1)   # вертикальное меню
     return builder.as_markup()
 
 def pending_reviews_keyboard():
@@ -176,7 +180,11 @@ def review_action_keyboard(review_id):
     builder.adjust(2)
     return builder.as_markup()
 
-# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
+# ==================== ОБРАБОТЧИКИ ====================
+async def cancel_booking(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Бронирование отменено.", reply_markup=main_menu_keyboard())
+
 async def start_command(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
@@ -190,10 +198,6 @@ async def start_command(message: Message, state: FSMContext):
         "Выберите действие:",
         reply_markup=main_menu_keyboard()
     )
-
-async def cancel_booking(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Бронирование отменено.", reply_markup=main_menu_keyboard())
 
 async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -264,6 +268,7 @@ async def start_booking(message: Message, state: FSMContext):
     for s in services:
         builder.button(text=s['name'], callback_data=f"service_{s['id']}")
     builder.button(text="🔙 Назад", callback_data="back_main")
+    builder.adjust(1)   # вертикальное меню
     await message.answer("Выберите услугу:", reply_markup=builder.as_markup())
     await state.set_state(BookingState.choosing_service)
 
@@ -271,7 +276,10 @@ async def service_chosen(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     service_id = int(callback.data.split("_")[1])
     await state.update_data(service_id=service_id)
-    await callback.message.edit_text("Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2025):")
+    await callback.message.edit_text(
+        "Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2025):\n"
+        "⏰ Время будет указано по Чите (UTC+9)"
+    )
     await state.set_state(BookingState.choosing_date)
 
 async def date_chosen(message: Message, state: FSMContext):
@@ -296,17 +304,26 @@ async def date_chosen(message: Message, state: FSMContext):
     for t in free_times:
         builder.button(text=t, callback_data=f"time_{t}")
     builder.button(text="🔙 Назад", callback_data="back_main")
-    await message.answer("Выберите время:", reply_markup=builder.as_markup())
+    await message.answer(
+        f"Выберите время (по Чите):\nДоступные слоты: {WORK_START_HOUR}:00 – {WORK_END_HOUR-1}:00",
+        reply_markup=builder.as_markup()
+    )
     await state.set_state(BookingState.choosing_time)
 
 async def time_chosen(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     time_str = callback.data.split("_")[1]
     await state.update_data(time=time_str)
-    data = await state.get_data()
-    service = db_query("SELECT name FROM services WHERE id=?", (data['service_id'],), fetch_one=True)
-    text = f"📝 *Подтверждение записи*\n\nУслуга: {service['name']}\nДата: {data['date']}\nВремя: {time_str}\n\nДля подтверждения укажите ваш номер телефона:"
-    await callback.message.edit_text(text, parse_mode="Markdown")
+    await callback.message.edit_text("Введите ваше имя (как к вам обращаться):")
+    await state.set_state(BookingState.choosing_name)
+
+async def name_entered(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if not name:
+        await message.answer("Пожалуйста, введите имя.")
+        return
+    await state.update_data(name=name)
+    await message.answer("Введите ваш номер телефона для связи:")
     await state.set_state(BookingState.entering_phone)
 
 async def phone_entered(message: Message, state: FSMContext):
@@ -317,15 +334,29 @@ async def phone_entered(message: Message, state: FSMContext):
     await state.update_data(phone=phone)
     data = await state.get_data()
     user_id = message.from_user.id
+
+    # Обновляем имя и телефон в таблице users
+    db_query("UPDATE users SET full_name=?, phone=? WHERE telegram_id=?", (data['name'], phone, user_id))
+
+    # Создаём запись
     db_query("""
         INSERT INTO appointments (user_id, service_id, appointment_date, appointment_time)
         VALUES (?, ?, ?, ?)
     """, (user_id, data['service_id'], data['date'], data['time']))
+
     await message.answer("✅ Ваша запись создана! Ожидайте подтверждения администратора.", reply_markup=main_menu_keyboard())
     await state.clear()
+
+    # Уведомление администратору
     for admin_id in ADMIN_IDS:
         try:
-            await message.bot.send_message(admin_id, f"📅 Новая запись от {message.from_user.full_name} на {data['date']} {data['time']}")
+            await message.bot.send_message(
+                admin_id,
+                f"📅 Новая запись от {data['name']}\n"
+                f"📞 {phone}\n"
+                f"Услуга: {db_query('SELECT name FROM services WHERE id=?', (data['service_id'],), fetch_one=True)['name']}\n"
+                f"Дата: {data['date']} {data['time']} (Чита)"
+            )
         except Exception as e:
             logger.error(f"Ошибка отправки админу {admin_id}: {e}")
 
@@ -339,11 +370,11 @@ async def admin_command(message: Message):
 async def admin_today(callback: CallbackQuery):
     today_str = date.today().strftime("%d.%m.%Y")
     appointments = db_query("""
-        SELECT a.appointment_time, s.name as service_name, u.full_name 
+        SELECT a.appointment_time, s.name as service_name, u.full_name, u.phone
         FROM appointments a 
         JOIN services s ON a.service_id = s.id 
         JOIN users u ON a.user_id = u.telegram_id 
-        WHERE a.appointment_date=? AND status!='completed'
+        WHERE a.appointment_date=? AND a.status!='completed'
         ORDER BY a.appointment_time
     """, (today_str,), fetch_all=True)
     if not appointments:
@@ -351,17 +382,17 @@ async def admin_today(callback: CallbackQuery):
         return
     text = f"📅 *Записи на {today_str}:*\n\n"
     for app in appointments:
-        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n\n"
+        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n📞 {app['phone']}\n\n"
     await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
 async def admin_tomorrow(callback: CallbackQuery):
     tomorrow_str = (date.today() + timedelta(days=1)).strftime("%d.%m.%Y")
     appointments = db_query("""
-        SELECT a.appointment_time, s.name as service_name, u.full_name 
+        SELECT a.appointment_time, s.name as service_name, u.full_name, u.phone
         FROM appointments a 
         JOIN services s ON a.service_id = s.id 
         JOIN users u ON a.user_id = u.telegram_id 
-        WHERE a.appointment_date=? AND status!='completed'
+        WHERE a.appointment_date=? AND a.status!='completed'
         ORDER BY a.appointment_time
     """, (tomorrow_str,), fetch_all=True)
     if not appointments:
@@ -369,12 +400,12 @@ async def admin_tomorrow(callback: CallbackQuery):
         return
     text = f"📅 *Записи на {tomorrow_str}:*\n\n"
     for app in appointments:
-        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n\n"
+        text += f"🕒 {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n📞 {app['phone']}\n\n"
     await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
 async def admin_all(callback: CallbackQuery):
     appointments = db_query("""
-        SELECT a.appointment_date, a.appointment_time, s.name as service_name, u.full_name 
+        SELECT a.appointment_date, a.appointment_time, s.name as service_name, u.full_name, u.phone
         FROM appointments a 
         JOIN services s ON a.service_id = s.id 
         JOIN users u ON a.user_id = u.telegram_id 
@@ -386,7 +417,7 @@ async def admin_all(callback: CallbackQuery):
         return
     text = "📋 *Все активные записи:*\n\n"
     for app in appointments:
-        text += f"📅 {app['appointment_date']} {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n\n"
+        text += f"📅 {app['appointment_date']} {app['appointment_time']} – {app['service_name']}\n👤 {app['full_name']}\n📞 {app['phone']}\n\n"
     await callback.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=admin_keyboard())
 
 async def admin_pending_reviews(callback: CallbackQuery):
@@ -441,6 +472,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
+    # Регистрация обработчиков
     dp.message.register(start_command, Command("start"))
     dp.message.register(cancel_booking, Command("cancel"))
     dp.message.register(admin_command, Command("admin"))
@@ -455,6 +487,7 @@ async def main():
     dp.callback_query.register(service_chosen, F.data.startswith("service_"))
     dp.callback_query.register(time_chosen, F.data.startswith("time_"))
     dp.message.register(date_chosen, BookingState.choosing_date)
+    dp.message.register(name_entered, BookingState.choosing_name)
     dp.message.register(phone_entered, BookingState.entering_phone)
 
     print("🚀 Бот запущен!")

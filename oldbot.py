@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram-бот для визажиста
-Версия: 5.0 – исправлены эмодзи, удаление сообщений пользователя, все ошибки
+Версия: 6.0 – добавлены кнопки "Назад" на всех этапах, исправлена кнопка "Услуги"
 """
 
 import asyncio
@@ -22,7 +22,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "8615339487:AAE34fezdBoQ1Dof5eoCzZi4bAwMpSrdrY0"
 ADMIN_IDS = [6298119477]          # ЗАМЕНИТЕ НА СВОЙ ID
-REVIEW_CHANNEL_ID = -1003884818442  # ЗАМЕНИТЕ НА ID КАНАЛА
+REVIEW_CHANNEL_ID = -100388481844  # ЗАМЕНИТЕ НА ID КАНАЛА
 
 WORK_START_HOUR = 10
 WORK_END_HOUR = 20
@@ -31,7 +31,6 @@ WORK_DAYS = [0, 1, 2, 3, 4, 5, 6]  # 0=пн, 1=вт, ..., 6=вс
 CHITA_TZ = pytz.timezone("Asia/Chita")
 
 # ==================== КАСТОМНЫЕ ЭМОДЗИ ====================
-# ВАЖНО: эти строки должны быть именно такими, без лишних пробелов
 EMOJI_CHECKMARK = '<tg-emoji emoji-id="5262832270573582269">✅</tg-emoji>'
 EMOJI_CLOCK = '<tg-emoji emoji-id="5258258882022612173">⏰</tg-emoji>'
 EMOJI_CALENDAR = '<tg-emoji emoji-id="5258105663359294787">📅</tg-emoji>'
@@ -176,22 +175,22 @@ async def delete_user_message(message: Message):
 # ==================== КЛАВИАТУРЫ ====================
 def main_menu_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="📅 Записаться", callback_data="book")
-    builder.button(text="💇‍♀️ Услуги", callback_data="services")
-    builder.button(text="📋 Мои записи", callback_data="my_appointments")
-    builder.button(text="⭐ Отзывы", callback_data="reviews")
-    builder.button(text="📝 Оставить отзыв", callback_data="write_review")
-    builder.button(text="📱 Канал с отзывами", callback_data="reviews_channel")
+    builder.button(text="Записаться", callback_data="book")
+    builder.button(text="Услуги", callback_data="services")
+    builder.button(text="Мои записи", callback_data="my_appointments")
+    builder.button(text="Отзывы", callback_data="reviews")
+    builder.button(text="Оставить отзыв", callback_data="write_review")
+    builder.button(text="Канал с отзывами", callback_data="reviews_channel")
     builder.adjust(2)
     return builder.as_markup()
 
 def admin_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="📅 Записи на сегодня", callback_data="admin_today")
-    builder.button(text="🗓 Записи на завтра", callback_data="admin_tomorrow")
-    builder.button(text="📝 Все активные записи", callback_data="admin_all")
-    builder.button(text="✅ Отзывы на модерацию", callback_data="admin_pending_reviews")
-    builder.button(text="🔙 Назад", callback_data="back_main")
+    builder.button(text="Записи на сегодня", callback_data="admin_today")
+    builder.button(text="Записи на завтра", callback_data="admin_tomorrow")
+    builder.button(text="Все активные записи", callback_data="admin_all")
+    builder.button(text="Отзывы на модерацию", callback_data="admin_pending_reviews")
+    builder.button(text="Назад", callback_data="back_main")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -200,9 +199,14 @@ def services_keyboard():
     builder = InlineKeyboardBuilder()
     for s in services:
         builder.button(text=f"{s['name']} - {s['price']} ₽", callback_data=f"service_{s['id']}")
-    builder.button(text="🔙 Назад", callback_data="back_main")
+    builder.button(text="Назад", callback_data="back_main")
     builder.adjust(1)
     return builder.as_markup()
+
+def back_button(callback_data="back_main"):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Назад", callback_data=callback_data)]
+    ])
 
 def pending_reviews_keyboard():
     reviews = db_query("SELECT id, user_id, text FROM reviews WHERE status='pending'", fetch_all=True)
@@ -211,22 +215,27 @@ def pending_reviews_keyboard():
         user = db_query("SELECT full_name, username FROM users WHERE telegram_id=?", (r['user_id'],), fetch_one=True)
         name = user['full_name'] or user['username'] or str(r['user_id'])
         builder.button(text=f"{name}: {r['text'][:30]}...", callback_data=f"review_{r['id']}")
-    builder.button(text="🔙 Назад", callback_data="back_admin")
+    builder.button(text="Назад", callback_data="back_admin")
     builder.adjust(1)
     return builder.as_markup()
 
 def review_action_keyboard(review_id):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Опубликовать", callback_data=f"publish_review_{review_id}")
-    builder.button(text="❌ Отклонить", callback_data=f"reject_review_{review_id}")
-    builder.button(text="🔙 Назад", callback_data="admin_pending_reviews")
+    builder.button(text="Опубликовать", callback_data=f"publish_review_{review_id}")
+    builder.button(text="Отклонить", callback_data=f"reject_review_{review_id}")
+    builder.button(text="Назад", callback_data="admin_pending_reviews")
     builder.adjust(2)
     return builder.as_markup()
 
 def channel_link_keyboard():
     channel_url = f"https://t.me/c/{str(REVIEW_CHANNEL_ID)[4:]}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Открыть канал с отзывами", url=channel_url)]
+        [InlineKeyboardButton(text="Открыть канал с отзывами", url=channel_url)]
+    ])
+
+def simple_back_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Назад", callback_data="back_main")]
     ])
 
 # ==================== ОБРАБОТЧИКИ ====================
@@ -272,9 +281,9 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
 
 async def show_services(callback: CallbackQuery):
     services = db_query("SELECT name, price FROM services", fetch_all=True)
-    text = "💇‍♀️ <b>Наши услуги:</b>\n\n"
+    text = "Наши услуги:\n\n"
     for s in services:
-        text += f"{EMOJI_BULLET} {s['name']} — {s['price']} ₽\n"
+        text += f"• {s['name']} — {s['price']} ₽\n"
     await send_or_edit_message(callback, text, parse_mode="HTML", reply_markup=main_menu_keyboard())
 
 async def show_my_appointments(callback: CallbackQuery, user_id: int):
@@ -288,7 +297,7 @@ async def show_my_appointments(callback: CallbackQuery, user_id: int):
     if not appointments:
         await send_or_edit_message(callback, "У вас пока нет активных записей.", parse_mode="HTML", reply_markup=main_menu_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Ваши записи:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Ваши записи:\n\n"
     for app in appointments:
         text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']}\n"
         text += f"💇 {app['service_name']}\n"
@@ -306,9 +315,9 @@ async def show_reviews(callback: CallbackQuery):
     if not reviews:
         await send_or_edit_message(callback, "Пока нет отзывов. Станьте первым!", parse_mode="HTML", reply_markup=main_menu_keyboard())
         return
-    text = "⭐ <b>Последние отзывы:</b>\n\n"
+    text = "⭐ Последние отзывы:\n\n"
     for r in reviews:
-        text += f"⭐ <b>{r['full_name']}</b>\n{r['text']}\n\n"
+        text += f"⭐ {r['full_name']}\n{r['text']}\n\n"
         if r['photo_file_id']:
             # фото отправляем отдельно, но для простоты пока опускаем
             pass
@@ -320,16 +329,20 @@ async def start_review(message: Message, state: FSMContext):
     await state.set_state(ReviewState.waiting_for_text)
     await send_or_edit_message(message,
         "✍️ Напишите ваш отзыв о работе визажиста.\n\n"
-        "Вы можете поделиться впечатлениями, а после этого прикрепить фото (необязательно).",
-        parse_mode="HTML"
+        "Вы можете поделиться впечатлениями, а после этого прикрепить фото (необязательно).\n\n"
+        "Нажмите /cancel, чтобы отменить.",
+        parse_mode="HTML",
+        reply_markup=simple_back_keyboard()
     )
 
 async def review_text_received(message: Message, state: FSMContext):
     await delete_user_message(message)
     await state.update_data(review_text=message.text)
     await send_or_edit_message(message,
-        "📸 Теперь отправьте фото результата (или нажмите /skip, чтобы пропустить).",
-        parse_mode="HTML"
+        "📸 Теперь отправьте фото результата (или нажмите /skip, чтобы пропустить).\n\n"
+        "Нажмите /cancel, чтобы отменить.",
+        parse_mode="HTML",
+        reply_markup=simple_back_keyboard()
     )
     await state.set_state(ReviewState.waiting_for_photo)
 
@@ -390,7 +403,7 @@ async def start_booking(message: Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     for s in services:
         builder.button(text=s['name'], callback_data=f"service_{s['id']}")
-    builder.button(text="🔙 Назад", callback_data="back_main")
+    builder.button(text="Назад", callback_data="back_main")
     builder.adjust(1)
     await send_or_edit_message(message, "Выберите услугу:", reply_markup=builder.as_markup())
     await state.set_state(BookingState.choosing_service)
@@ -399,11 +412,15 @@ async def service_chosen(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     service_id = int(callback.data.split("_")[1])
     await state.update_data(service_id=service_id)
-    # Редактируем текущее сообщение (оно уже есть в callback.message)
+    # Добавляем кнопку "Назад"
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Назад", callback_data="book")]
+    ])
     await callback.message.edit_text(
         f"{EMOJI_CALENDAR} Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2025):\n"
         f"{EMOJI_CLOCK} Время будет указано по Чите (UTC+9)",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=back
     )
     await state.set_state(BookingState.choosing_date)
 
@@ -411,25 +428,26 @@ async def date_chosen(message: Message, state: FSMContext):
     await delete_user_message(message)
     date_str = message.text.strip()
     if not re.match(r"\d{2}\.\d{2}\.\d{4}", date_str):
-        await send_or_edit_message(message, "Неверный формат. Введите дату как ДД.ММ.ГГГГ", parse_mode="HTML")
+        await send_or_edit_message(message, "Неверный формат. Введите дату как ДД.ММ.ГГГГ", parse_mode="HTML", reply_markup=back_button("book"))
         return
     try:
         selected_date = datetime.strptime(date_str, "%d.%m.%Y").date()
         if selected_date < date.today():
-            await send_or_edit_message(message, "Дата не может быть в прошлом. Выберите другую.", parse_mode="HTML")
+            await send_or_edit_message(message, "Дата не может быть в прошлом. Выберите другую.", parse_mode="HTML", reply_markup=back_button("book"))
             return
         if selected_date.weekday() not in WORK_DAYS:
-            await send_or_edit_message(message, "В этот день я не работаю. Выберите другой день.", parse_mode="HTML")
+            await send_or_edit_message(message, "В этот день я не работаю. Выберите другой день.", parse_mode="HTML", reply_markup=back_button("book"))
             return
     except ValueError:
-        await send_or_edit_message(message, "Некорректная дата.", parse_mode="HTML")
+        await send_or_edit_message(message, "Некорректная дата.", parse_mode="HTML", reply_markup=back_button("book"))
         return
     await state.update_data(date=date_str)
     free_times = [f"{h}:00" for h in range(WORK_START_HOUR, WORK_END_HOUR)]
     builder = InlineKeyboardBuilder()
     for t in free_times:
         builder.button(text=t, callback_data=f"time_{t}")
-    builder.button(text="🔙 Назад", callback_data="back_main")
+    builder.button(text="Назад", callback_data="book")
+    builder.adjust(1)
     await send_or_edit_message(message,
         f"{EMOJI_CLOCK} Выберите время (по Чите):\nДоступные слоты: {WORK_START_HOUR}:00 – {WORK_END_HOUR-1}:00",
         reply_markup=builder.as_markup()
@@ -440,24 +458,27 @@ async def time_chosen(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     time_str = callback.data.split("_")[1]
     await state.update_data(time=time_str)
-    await callback.message.edit_text("Введите ваше имя (как к вам обращаться):", parse_mode="HTML")
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Назад", callback_data="book")]
+    ])
+    await callback.message.edit_text("Введите ваше имя (как к вам обращаться):", parse_mode="HTML", reply_markup=back)
     await state.set_state(BookingState.choosing_name)
 
 async def name_entered(message: Message, state: FSMContext):
     await delete_user_message(message)
     name = message.text.strip()
     if not name:
-        await send_or_edit_message(message, "Пожалуйста, введите имя.", parse_mode="HTML")
+        await send_or_edit_message(message, "Пожалуйста, введите имя.", parse_mode="HTML", reply_markup=back_button("book"))
         return
     await state.update_data(name=name)
-    await send_or_edit_message(message, f"{EMOJI_PHONE} Введите ваш номер телефона для связи:", parse_mode="HTML")
+    await send_or_edit_message(message, f"{EMOJI_PHONE} Введите ваш номер телефона для связи:", parse_mode="HTML", reply_markup=back_button("book"))
     await state.set_state(BookingState.entering_phone)
 
 async def phone_entered(message: Message, state: FSMContext):
     await delete_user_message(message)
     phone = message.text.strip()
     if not re.search(r"\d", phone):
-        await send_or_edit_message(message, "Пожалуйста, введите корректный номер телефона.", parse_mode="HTML")
+        await send_or_edit_message(message, "Пожалуйста, введите корректный номер телефона.", parse_mode="HTML", reply_markup=back_button("book"))
         return
     await state.update_data(phone=phone)
     data = await state.get_data()
@@ -469,10 +490,14 @@ async def phone_entered(message: Message, state: FSMContext):
         VALUES (?, ?, ?, ?)
     """, (user_id, data['service_id'], data['date'], data['time']))
 
+    # Кнопка для возврата в главное меню
+    back_to_menu = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="В главное меню", callback_data="back_main")]
+    ])
     await send_or_edit_message(message,
         f"{EMOJI_CHECKMARK} Ваша запись создана! Ожидайте подтверждения администратора.",
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard()
+        reply_markup=back_to_menu
     )
     await state.clear()
 
@@ -511,7 +536,7 @@ async def admin_today(callback: CallbackQuery):
     if not appointments:
         await callback.message.edit_text(f"На сегодня ({today_str}) записей нет.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Записи на {today_str}:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Записи на {today_str}:\n\n"
     for app in appointments:
         text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
@@ -531,7 +556,7 @@ async def admin_tomorrow(callback: CallbackQuery):
     if not appointments:
         await callback.message.edit_text(f"На завтра ({tomorrow_str}) записей нет.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Записи на {tomorrow_str}:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Записи на {tomorrow_str}:\n\n"
     for app in appointments:
         text += f"{EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
@@ -550,7 +575,7 @@ async def admin_all(callback: CallbackQuery):
     if not appointments:
         await callback.message.edit_text("Нет активных записей.", parse_mode="HTML", reply_markup=admin_keyboard())
         return
-    text = f"{EMOJI_CALENDAR} <b>Все активные записи:</b>\n\n"
+    text = f"{EMOJI_CALENDAR} Все активные записи:\n\n"
     for app in appointments:
         text += f"{EMOJI_CALENDAR} {app['appointment_date']} {EMOJI_CLOCK} {app['appointment_time']} – {app['service_name']}\n"
         text += f"👤 {app['full_name']}\n"
@@ -568,7 +593,7 @@ async def review_detail(callback: CallbackQuery):
         return
     user = db_query("SELECT full_name, username FROM users WHERE telegram_id=?", (review['user_id'],), fetch_one=True)
     name = user['full_name'] or user['username'] or "Клиент"
-    text = f"✍️ <b>Отзыв от {name}</b>\n\n{review['text']}"
+    text = f"✍️ Отзыв от {name}\n\n{review['text']}"
     if review['photo_file_id']:
         await callback.message.answer_photo(photo=review['photo_file_id'], caption=text, parse_mode="HTML")
     else:
@@ -584,7 +609,7 @@ async def publish_review(callback: CallbackQuery):
     db_query("UPDATE reviews SET status='published', published_at=CURRENT_TIMESTAMP WHERE id=?", (review_id,))
     user = db_query("SELECT full_name FROM users WHERE telegram_id=?", (review['user_id'],), fetch_one=True)
     name = user['full_name'] if user else "Клиент"
-    caption = f"⭐ <b>Отзыв от {name}</b>\n\n{review['text']}"
+    caption = f"⭐ Отзыв от {name}\n\n{review['text']}"
     try:
         if review['photo_file_id']:
             await callback.bot.send_photo(chat_id=REVIEW_CHANNEL_ID, photo=review['photo_file_id'], caption=caption, parse_mode="HTML")

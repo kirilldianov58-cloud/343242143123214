@@ -279,7 +279,8 @@ async def show_services(callback: CallbackQuery):
     text = "💇‍♀️ Наши услуги:\n\n"
     for s in services:
         text += f"• {s['name']} — {s['price']} ₽\n"
-    await send_or_edit_message(callback, text, parse_mode=None, reply_markup=main_menu_keyboard())
+    # Отправляем как обычное сообщение (без parse_mode), используем главное меню как клавиатуру
+    await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
 
 async def show_my_appointments(callback: CallbackQuery, user_id: int):
     appointments = db_query("""
